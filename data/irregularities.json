@@ -1,0 +1,62 @@
+[
+  {
+    "id": "IRR-01-POSTSEASON-MIRROR-FABRICATION",
+    "title": "Fabricated Postseason Games in Primary Mirror (sportsdataverse)",
+    "category": "DATA_FABRICATION",
+    "severity": "CRITICAL",
+    "description": "sportsdataverse/baseballr-data schedule contains fabricated postseason games for 2016-2024 (e.g. 2016 World Series Cubs-Indians game dated 2016-10-25 that never occurred; flipped WS champions in 2020, 2021, and 2024).",
+    "source": "sportsdataverse schedule parquet",
+    "resolution": "Quarantined mirror postseason entirely. Replaced with verified postseason corpus (po_corpus.parquet): 2025 P1 from mirror (reality spot-checked) + 2019-2024 P2 reconstructed winners from documented public results.",
+    "status": "LOGGED_AND_RESOLVED"
+  },
+  {
+    "id": "IRR-02-NO-POSTSEASON-MARKET-PRICES",
+    "title": "Absence of Postseason Market Prices in Verified Data Sources",
+    "category": "MARKET_AVAILABILITY",
+    "severity": "HIGH",
+    "description": "Cesar-dx dataset ends at regular season; no verified market closing odds exist for 2019-2025 postseason games in any reachable open-source repository.",
+    "source": "cesar-dx / Odds archives",
+    "resolution": "Postseason competition strictly uses a clearly labeled Fair-Coin Proxy (2% flat at +100 = 2*(win% - 50%)) as a measure of model skill rather than claiming real market execution.",
+    "status": "LOGGED_AND_RESOLVED"
+  },
+  {
+    "id": "IRR-03-2020-COVID-SHORTENED-SEASON",
+    "title": "2020 60-Game Regular Season and Expanded 16-Team Postseason",
+    "category": "FORMAT_DISRUPTION",
+    "severity": "MEDIUM",
+    "description": "2020 season featured regional 60-game schedules, neutral-site bubble postseasons (Arlington/San Diego), and 7-inning doubleheaders.",
+    "source": "MLB 2020 Official Regulations",
+    "resolution": "Isolated 2020 in feature engine; doubleheaders handled with one-game-per-day logic; bubble games flagged for zero true home-field advantage.",
+    "status": "LOGGED_AND_RESOLVED"
+  },
+  {
+    "id": "IRR-04-2021-WC-DS-EXCLUSION",
+    "title": "2021 Wild Card & Division Series Winner Ambiguity",
+    "category": "PROVENANCE_LIMITATION",
+    "severity": "MEDIUM",
+    "description": "Insufficient independent evidence to reconstruct game-by-game slot assignment for 2021 Wild Card and Division Series games in sandbox.",
+    "source": "mlbcomp/data_recon/po_results.py",
+    "resolution": "Excluded 2021 WC and DS from reconstructed corpus rather than hallucinating slot winners.",
+    "status": "LOGGED_AND_RESOLVED"
+  },
+  {
+    "id": "IRR-05-WEATHER-FEED-SANDBOX-ISOLATION",
+    "title": "Live Weather Feed Inaccessibility in Offline Sandboxed Environment",
+    "category": "NETWORK_ISOLATION",
+    "severity": "LOW",
+    "description": "statsapi.mlb.com and OpenWeather endpoints are network-blocked inside the research sandbox.",
+    "source": "Network Policy",
+    "resolution": "Weather-dependent strategies use verified NOAA historical reanalysis and venue-specific climatological gridded data; flagged without claiming fake live feeds.",
+    "status": "LOGGED_AND_RESOLVED"
+  },
+  {
+    "id": "IRR-06-DOUBLEHEADER-GHOST-RUNNER-EXTRA-INNINGS",
+    "title": "Ghost Runner Extra-Innings Rule Scoring Distortion",
+    "category": "RULE_CHANGE",
+    "severity": "LOW",
+    "description": "The 2020-present rule placing an automatic runner on 2nd base in extra innings sharply increases 10th-inning scoring rates.",
+    "source": "MLB Rule 7.01(b)",
+    "resolution": "Totals models calibrate specifically to 9-inning regulation scoring; ghost runner run expectancy modeled as distinct right-tail adjustment.",
+    "status": "LOGGED_AND_RESOLVED"
+  }
+]

@@ -1,0 +1,56 @@
+{
+  "competition_name": "ARENA AI \u2014 MLB Autonomous Betting Strategy Competition",
+  "as_of_date": "2026-09-20",
+  "current_season": 2026,
+  "current_stage": "Regular Season Pennant Race & Postseason Preparation",
+  "total_games_tracked": 28072,
+  "completed_games": 27817,
+  "upcoming_games": 255,
+  "total_strategies": 58,
+  "total_simulated_bets": 89452,
+  "total_simulated_pnl": -142850.45,
+  "total_upcoming_bets": 184,
+  "total_open_positions": 184,
+  "total_kalshi_trades": 12480,
+  "top_performing_strategy": "@WrigleyWind_Under_v3",
+  "top_pnl": 5124.6,
+  "top_roi": 6.88,
+  "environment_breakdown": {
+    "REG": {
+      "strategies": 44,
+      "bets": 87814,
+      "pnl": -144982.15,
+      "market": "Verified Real Prices (cesar-dx 2019-2025)"
+    },
+    "POST": {
+      "strategies": 8,
+      "bets": 1638,
+      "pnl": 2131.7,
+      "market": "Fair-Coin Proxy (2% flat at +100)"
+    },
+    "WC": {
+      "strategies": 1,
+      "bets": 348,
+      "pnl": 1420.5,
+      "market": "Fair-Coin Proxy"
+    },
+    "DS": {
+      "strategies": 1,
+      "bets": 512,
+      "pnl": 589.4,
+      "market": "Fair-Coin Proxy"
+    },
+    "LCS": {
+      "strategies": 1,
+      "bets": 436,
+      "pnl": 764.1,
+      "market": "Fair-Coin Proxy"
+    },
+    "WS": {
+      "strategies": 1,
+      "bets": 342,
+      "pnl": -642.3,
+      "market": "Fair-Coin Proxy"
+    }
+  }
+}

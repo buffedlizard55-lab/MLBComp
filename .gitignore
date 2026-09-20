@@ -1,7 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
-data/
+data/raw/
+data/features/
+*.parquet
 *.db
 *.sqlite3
 .DS_Store
