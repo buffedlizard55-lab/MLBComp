@@ -256,7 +256,12 @@ function renderKPIs() {
 
   document.getElementById('kpi-upcoming').textContent = s.total_upcoming_bets;
   document.getElementById('kpi-top-strat').textContent = s.top_performing_strategy;
-  document.getElementById('kpi-top-roi').textContent = `ROI: +${s.top_roi}% (+$${s.top_pnl.toLocaleString('en-US', { minimumFractionDigits: 2 })})`;
+  // top_roi is now usually negative (no strategy beats the verified market),
+  // so the sign must be handled rather than hard-prefixed with '+'.
+  const tRoi = Number(s.top_roi || 0), tPnl = Number(s.top_pnl || 0);
+  const roiEl = document.getElementById('kpi-top-roi');
+  roiEl.textContent = `ROI: ${tRoi >= 0 ? '+' : '\u2212'}${Math.abs(tRoi).toFixed(3)}% at verified prices ($${tPnl >= 0 ? '+' : '\u2212'}${Math.abs(tPnl).toLocaleString('en-US', { minimumFractionDigits: 2 })})`;
+  roiEl.style.color = tRoi >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
 }
 
 // ================= DASHBOARD VIEW =================
