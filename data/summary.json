@@ -1,25 +1,25 @@
 {
   "competition_name": "ARENA AI \u2014 MLB Autonomous MLB Research & Paper Competition",
   "as_of_date": "2026-09-21",
-  "generated_at": "2026-09-21T19:31:43Z",
+  "generated_at": "2026-09-21T22:54:35Z",
   "generated_by": "mlbcomp.web.export_static",
-  "data_mode": "NO_SOURCE_SNAPSHOT",
+  "data_mode": "SOURCE_SNAPSHOT",
   "current_season": 2026,
-  "current_stage": "No source snapshot loaded \u2014 no upcoming wager is asserted",
-  "total_games_tracked": 0,
-  "completed_games": 0,
-  "upcoming_games": 0,
+  "current_stage": "Source snapshot loaded; live availability requires a fresh run",
+  "total_games_tracked": 28072,
+  "completed_games": 27972,
+  "upcoming_games": 100,
   "total_strategies": 68,
-  "total_simulated_bets": 0,
+  "total_simulated_bets": 144098,
   "settled_bets": 0,
   "total_simulated_pnl": null,
   "pnl_basis": "Verified observed quotes only; no price means no stake, PnL or ROI.",
-  "total_upcoming_bets": 0,
+  "total_upcoming_bets": 441,
   "total_open_positions": 0,
   "total_kalshi_trades": 0,
   "kalshi_status": "OPTIONAL \u2014 no contracts, quotes, fills or liquidity are created without verified API observations",
-  "ledger_records_exported": 0,
-  "ledger_records_in_db": 0,
+  "ledger_records_exported": 20000,
+  "ledger_records_in_db": 144098,
   "ledger_note": "The immutable ledger is append-only; the static export may be capped for page size.",
   "top_performing_strategy": null,
   "top_pnl": null,
@@ -27,62 +27,62 @@
   "environment_breakdown": {
     "REG": {
       "strategies": 38,
-      "records": 0,
+      "records": 139442,
       "settled": 0,
-      "evaluation_picks": 0,
+      "evaluation_picks": 113558,
       "verified_bets": 0,
       "verified_pnl": null,
-      "status": "NO_DATA"
+      "status": "NO_VERIFIED_MARKET_PRICE"
     },
     "POST": {
       "strategies": 14,
-      "records": 0,
+      "records": 3648,
       "settled": 0,
-      "evaluation_picks": 0,
+      "evaluation_picks": 3648,
       "verified_bets": 0,
       "verified_pnl": null,
-      "status": "NO_DATA"
+      "status": "NO_VERIFIED_MARKET_PRICE"
     },
     "WC": {
       "strategies": 4,
-      "records": 0,
+      "records": 167,
       "settled": 0,
-      "evaluation_picks": 0,
+      "evaluation_picks": 167,
       "verified_bets": 0,
       "verified_pnl": null,
-      "status": "NO_DATA"
+      "status": "NO_VERIFIED_MARKET_PRICE"
     },
     "DS": {
       "strategies": 4,
-      "records": 0,
+      "records": 418,
       "settled": 0,
-      "evaluation_picks": 0,
+      "evaluation_picks": 418,
       "verified_bets": 0,
       "verified_pnl": null,
-      "status": "NO_DATA"
+      "status": "NO_VERIFIED_MARKET_PRICE"
     },
     "LCS": {
       "strategies": 4,
-      "records": 0,
+      "records": 276,
       "settled": 0,
-      "evaluation_picks": 0,
+      "evaluation_picks": 276,
       "verified_bets": 0,
       "verified_pnl": null,
-      "status": "NO_DATA"
+      "status": "NO_VERIFIED_MARKET_PRICE"
     },
     "WS": {
       "strategies": 4,
-      "records": 0,
+      "records": 147,
       "settled": 0,
-      "evaluation_picks": 0,
+      "evaluation_picks": 147,
       "verified_bets": 0,
       "verified_pnl": null,
-      "status": "NO_DATA"
+      "status": "NO_VERIFIED_MARKET_PRICE"
     }
   },
   "limitations": [
-    "This checkout contains no fetched source snapshot unless data/raw or data/features is populated.",
-    "Historical odds without an observed decision-time timestamp are not eligible for paper PnL.",
+    "Source snapshot via api.github.com blobs: sportsdataverse/baseballr-data (schedule+play-by-play) + cesar-dx/mlb-betting-ml (moneyline) \u2014 content-addressed and cross-checked.",
+    "Historical odds without an observed decision-time timestamp are not eligible for paper PnL; evaluation uses scores for Brier/log-loss only.",
     "Postseason has distinct REG/POST/WC/DS/LCS/WS models and leaderboards; a small sample does not establish an edge.",
     "No real-money order connector exists; all positions are paper-only."
   ]

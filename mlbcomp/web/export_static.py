@@ -133,9 +133,29 @@ def _upcoming() -> list[dict[str, Any]]:
     predictions = _db_frame("SELECT * FROM predictions ORDER BY decision_time, prediction_id")
     if predictions.empty:
         return []
-    # Predictions are not automatically made bets.  Preserve the distinction.
-    games = _db_frame("SELECT game_pk,game_date,start_utc,home_team_id,away_team_id,round_code FROM games")
+    # Only future/incomplete games are \"upcoming\"; historical predictions are
+    # evaluation records, not forward proposals.
+    games = _db_frame("SELECT game_pk,game_date,start_utc,home_team_id,away_team_id,round_code,home_score FROM games")
+    if games.empty:
+        # No games table -> fall back to empty upcoming rather than leaking history
+        return []
+    # True upcoming = scheduled future (game_date >= TODAY), not historic cancelled/incomplete voids
+    upcoming_candidates = games[games.home_score.isna()]
+    if not upcoming_candidates.empty:
+        upcoming_candidates = upcoming_candidates[upcoming_candidates.game_date.astype(str) >= TODAY]
+    upcoming_pks = set(upcoming_candidates.game_pk.astype(int).tolist()) if not upcoming_candidates.empty else set()
+    # Fallback: if DB filter yields nothing but parquet has scheduled future, use parquet
+    if not upcoming_pks and FEAT.exists():
+        try:
+            import pandas as pd
+            if (FEAT / "games.parquet").exists():
+                g = pd.read_parquet(FEAT / "games.parquet")
+                g_up = g[g.home_score.isna() & (g.game_date.astype(str) >= TODAY)]
+                upcoming_pks = set(g_up.game_pk.astype(int).tolist())
+        except Exception:
+            pass
     game_map = {int(r.game_pk): r for r in games.itertuples()} if not games.empty else {}
+    filtered = predictions[predictions.game_pk.astype(int).isin(upcoming_pks)] if upcoming_pks else predictions.iloc[0:0]
     return [{"prediction_id": r.prediction_id, "strategy_version_id": r.strategy_version_id,
              "game_pk": int(r.game_pk), "round_code": r.round_code,
              "decision_time": r.decision_time, "selection": r.selection,
@@ -144,7 +164,7 @@ def _upcoming() -> list[dict[str, Any]]:
              "status": "PROPOSED", "market_price": None,
              "verification_status": "NO_MARKET_PRICE",
              "game_available": int(r.game_pk) in game_map}
-            for r in predictions.itertuples()]
+            for r in filtered.itertuples()]
 
 
 def _research() -> list[dict[str, Any]]:
@@ -246,8 +266,8 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
         "top_performing_strategy": None, "top_pnl": None, "top_roi": None,
         "environment_breakdown": env_breakdown,
         "limitations": [
-            "This checkout contains no fetched source snapshot unless data/raw or data/features is populated.",
-            "Historical odds without an observed decision-time timestamp are not eligible for paper PnL.",
+            "Source snapshot via api.github.com blobs: sportsdataverse/baseballr-data (schedule+play-by-play) + cesar-dx/mlb-betting-ml (moneyline) — content-addressed and cross-checked." if source_snapshot else "This checkout contains no fetched source snapshot unless data/raw or data/features is populated.",
+            "Historical odds without an observed decision-time timestamp are not eligible for paper PnL; evaluation uses scores for Brier/log-loss only.",
             "Postseason has distinct REG/POST/WC/DS/LCS/WS models and leaderboards; a small sample does not establish an edge.",
             "No real-money order connector exists; all positions are paper-only.",
         ],
