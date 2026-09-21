@@ -2,11 +2,14 @@
 
 DATA GATE (verified corpus):
   * REG games: mirror schedule 2015-2026 (2019-2025 cross-verified against
-    an independent odds source; 2026 single-source, live through 2026-09-19).
-  * POSTSEASON games: ONLY the verified corpus (po_corpus.parquet):
-      P1 = 2025 mirror (reality spot-checked, full scores)
-      P2 = 2019-2024 reconstructed game winners (no scores)
-    The mirror's own 2019-2024 PO rows are FABRICATED and never used.
+    an independent odds source; 2026 single-source, in progress).
+  * POSTSEASON games: po_corpus.parquet, which is the mirror's own postseason
+    2015-2026 with real scores.  It is gated by an independent cross-check in
+    features/po_corpus.py: the corpus must reproduce all eleven documented
+    World Series champions 2015-2025 or the build raises.
+    (The 2019-2024 rows were previously replaced by hand-written
+    "reconstructed winners"; that reconstruction contained invented series
+    results and has been retired — see the po_corpus docstring.)
 
 MARKET GATE (verified prices only, spec §13):
   * Real moneylines exist ONLY for REG 2019-2025 (cesar-dx source, 15,442
@@ -51,12 +54,20 @@ FAIRCOIN_DECIMAL = 2.0  # +100 proxy price
 
 
 def _need(yr: int, rnd: str) -> int:
-    """Wins required to take the series (drives clinch/elimination flags)."""
+    """Wins required to take the series (drives clinch/elimination flags).
+
+    Two bugs fixed 2026-09-21 (both changed series-state features, so every
+    postseason clinch/elimination flag before this was partly wrong):
+      * 2015 (and 2012) had a SINGLE-GAME wild card -> 1 win, not 2.
+      * the 2020 Division Series was best-of-FIVE (3 wins).  The 2020
+        expansion lengthened the wild-card round to best-of-three; the DS
+        kept its normal length (MLB, 2020-07-23).
+    Kept in sync with ingest.baseballr.round_needed.
+    """
     if rnd == "WC":
-        return 1 if yr == 2019 else 2
+        return 1 if yr in (2012, 2015) else 2
     if rnd == "DS":
-        return {2019: 3, 2020: 2, 2021: 3, 2022: 3, 2023: 3,
-                2024: 3, 2025: 3}.get(yr, 3)
+        return 3
     return 4
 
 
@@ -79,29 +90,17 @@ def build_backtest_games() -> pd.DataFrame:
         if c not in po.columns:
             po[c] = np.nan
     po["game_type"] = "PO"
-    po["status"] = "F"
-    po["completed"] = True
-    po["home_win"] = (po.winner_team_id == po.home_team_id).astype(int)
+    po["status"] = np.where(po.completed.astype(bool), "F", "PRE")
+    # home_win is only defined for settled games; unsettled rows stay NA so
+    # they can never be settled by accident.
+    settled = po.winner_team_id.notna()
+    po["home_win"] = pd.Series(
+        np.where(settled, (po.winner_team_id == po.home_team_id).astype(float),
+                 np.nan), index=po.index).astype("Int64")
 
-    # reconstructed games carry a synthetic 3-2 score ONLY so the feature
-    # engine can propagate state into the following season; settlement uses
-    # the known winner, never this score (score_available=False).
-    recon = po[po.provenance == "reconstructed_winners"]
-    po.loc[recon.index, "home_score"] = np.where(recon.home_win == 1, 3, 2)
-    po.loc[recon.index, "away_score"] = np.where(recon.home_win == 1, 2, 3)
-
-    # series ids: real mirror key for 2025 P1; synthetic for P2 (the mirror
-    # series table for 2019-2024 is fabricated and must not be used)
-    po["series_key"] = [
-        f"R{int(s)}:{r}:{l}:{min(int(a), int(b))}-{max(int(a), int(b))}"
-        for s, r, l, a, b in zip(po.season, po.round_code, po.league,
-                                 po.home_team_id, po.away_team_id)]
-    mirror_po = g[g.round_code.notna() & (g.season == 2025)].set_index("game_pk")
-    real_key = {pk: r.series_key for pk, r in mirror_po.iterrows()
-                if isinstance(r.series_key, str)}
-    po["series_key"] = [real_key.get(pk, sk) for pk, sk in
-                        zip(po.game_pk, po["series_key"])]
-
+    # The corpus is the mirror's own postseason (see features/po_corpus.py),
+    # so game_pk, series_key, dates and scores are all real.  No synthetic
+    # scores and no synthetic series keys are injected here any more.
     out = pd.concat([reg, po], ignore_index=True)
     out["start_ts"] = pd.to_datetime(out.start_utc, utc=True, errors="coerce")
     out["date"] = pd.to_datetime(out.game_date, errors="coerce")
@@ -566,3 +565,26 @@ def combined_view() -> pd.DataFrame:
             "worst_env": d.loc[d.roi.idxmin(), "env"] if len(d) else None,
         })
     return pd.DataFrame(rows).set_index("strategy_id")
+
+
+if __name__ == "__main__":
+    # The documented entry point: `python -m mlbcomp.engine.backtest`.
+    res = run_backtest()
+    print(f"[backtest] settled={res['settled_bets']} eval_picks={res['eval_picks']} "
+          f"open={res['open_bets']} proposed={res['proposed_bets']} "
+          f"totals_skipped_no_score={res['totals_skipped_no_score']}")
+    print(f"[backtest] round intercepts (promoted from prior PO seasons): "
+          f"{res['round_intercepts']}")
+    st = strategy_stats()
+    agg = (st.groupby("env")
+             .agg(strategies=("strategy_id", "nunique"),
+                  bets=("bets", "sum"),
+                  eval_picks=("eval_picks", "sum"),
+                  stake=("stake_sum", "sum"),
+                  pnl=("pnl", "sum"),
+                  fc_bets=("fc_bets", "sum"))
+             .reindex(["REG", "POST", "WC", "DS", "LCS", "WS"])
+             .dropna(how="all"))
+    agg["roi"] = (agg.pnl / agg.stake).where(agg.stake > 0)
+    print("\n[backtest] per-environment totals")
+    print(agg.to_string())

@@ -1,56 +1,95 @@
 {
-  "competition_name": "ARENA AI \u2014 MLB Autonomous Betting Strategy Competition",
-  "as_of_date": "2026-09-20",
+  "competition_name": "ARENA AI \u2014 MLB Autonomous Betting Research & Testing",
+  "as_of_date": "2026-09-21",
+  "generated_by": "mlbcomp.web.export_static (source: data/mlbcomp.db)",
   "current_season": 2026,
-  "current_stage": "Regular Season Pennant Race & Postseason Preparation",
+  "current_stage": "2026 regular season in progress (snapshot 2026-09-19)",
   "total_games_tracked": 28072,
-  "completed_games": 27817,
-  "upcoming_games": 255,
-  "total_strategies": 58,
-  "total_simulated_bets": 89452,
-  "total_simulated_pnl": -142850.45,
-  "total_upcoming_bets": 184,
-  "total_open_positions": 184,
-  "total_kalshi_trades": 12480,
-  "top_performing_strategy": "@WrigleyWind_Under_v3",
-  "top_pnl": 5124.6,
-  "top_roi": 6.88,
+  "completed_games": 27957,
+  "upcoming_games": 115,
+  "total_strategies": 14,
+  "total_simulated_bets": 126840,
+  "settled_bets": 81534,
+  "total_simulated_pnl": -49953.15,
+  "pnl_basis": "settled PnL at VERIFIED prices only (56,122 of 81,534 settled bets); assumed-price and synthetic-line PnL is excluded",
+  "total_upcoming_bets": 532,
+  "total_open_positions": 0,
+  "total_kalshi_trades": 0,
+  "kalshi_status": "DATA_UNAVAILABLE \u2014 api.elections.kalshi.com unreachable; no fills are simulated",
+  "ledger_records_exported": 5000,
+  "ledger_records_in_db": 81534,
+  "ledger_note": "ledger capped at the 5,000 most recent settled bets; 81,534 exist in the database",
+  "top_performing_strategy": "MLB_REG_SEASON_001",
+  "top_pnl": -10000.0,
+  "top_roi": -0.262,
+  "top_roi_basis": "ROI per dollar staked at verified 2019-2025 moneyline prices (the only real market in this system)",
   "environment_breakdown": {
-    "REG": {
-      "strategies": 44,
-      "bets": 87814,
-      "pnl": -144982.15,
-      "market": "Verified Real Prices (cesar-dx 2019-2025)"
-    },
-    "POST": {
-      "strategies": 8,
-      "bets": 1638,
-      "pnl": 2131.7,
-      "market": "Fair-Coin Proxy (2% flat at +100)"
-    },
-    "WC": {
-      "strategies": 1,
-      "bets": 348,
-      "pnl": 1420.5,
-      "market": "Fair-Coin Proxy"
-    },
     "DS": {
       "strategies": 1,
-      "bets": 512,
-      "pnl": 589.4,
-      "market": "Fair-Coin Proxy"
+      "bets": 130,
+      "settled": 130,
+      "verified_bets": 0,
+      "verified_pnl": 0.0,
+      "assumed_bets": 130,
+      "synthetic_bets": 0,
+      "pnl": 0.0,
+      "market": "NO verified prices exist \u2014 every bet settled at an assumed +100 placeholder (model-skill metric only)"
     },
     "LCS": {
       "strategies": 1,
-      "bets": 436,
-      "pnl": 764.1,
-      "market": "Fair-Coin Proxy"
+      "bets": 83,
+      "settled": 83,
+      "verified_bets": 0,
+      "verified_pnl": 0.0,
+      "assumed_bets": 83,
+      "synthetic_bets": 0,
+      "pnl": 0.0,
+      "market": "NO verified prices exist \u2014 every bet settled at an assumed +100 placeholder (model-skill metric only)"
+    },
+    "POST": {
+      "strategies": 4,
+      "bets": 1134,
+      "settled": 1134,
+      "verified_bets": 0,
+      "verified_pnl": 0.0,
+      "assumed_bets": 1134,
+      "synthetic_bets": 0,
+      "pnl": 0.0,
+      "market": "NO verified prices exist \u2014 every bet settled at an assumed +100 placeholder (model-skill metric only)"
+    },
+    "REG": {
+      "strategies": 6,
+      "bets": 125401,
+      "settled": 124869,
+      "verified_bets": 56122,
+      "verified_pnl": -49953.15,
+      "assumed_bets": 43339,
+      "synthetic_bets": 25408,
+      "pnl": 5445073979.67,
+      "market": "verified real prices for the 2019-2025 REG subset (cesar-dx moneylines); all other games settled at an assumed +100 placeholder"
+    },
+    "WC": {
+      "strategies": 1,
+      "bets": 48,
+      "settled": 48,
+      "verified_bets": 0,
+      "verified_pnl": 0.0,
+      "assumed_bets": 48,
+      "synthetic_bets": 0,
+      "pnl": 0.0,
+      "market": "NO verified prices exist \u2014 every bet settled at an assumed +100 placeholder (model-skill metric only)"
     },
     "WS": {
       "strategies": 1,
-      "bets": 342,
-      "pnl": -642.3,
-      "market": "Fair-Coin Proxy"
+      "bets": 44,
+      "settled": 44,
+      "verified_bets": 0,
+      "verified_pnl": 0.0,
+      "assumed_bets": 44,
+      "synthetic_bets": 0,
+      "pnl": 0.0,
+      "market": "NO verified prices exist \u2014 every bet settled at an assumed +100 placeholder (model-skill metric only)"
     }
-  }
+  },
+  "pnl_warning": "The engine compounds quarter-Kelly stakes and settles unpriced games at an assumed +100 placeholder plus a synthetic 8.5 totals line. Compounded bankroll is therefore not published; ROI per dollar staked at verified prices is the only market claim made here."
 }

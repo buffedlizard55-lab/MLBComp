@@ -1,110 +1,98 @@
 [
   {
-    "name": "GAMES_SOURCE_EXISTS",
-    "category": "DATA_INTEGRITY",
+    "name": "dup_game_pk",
+    "category": "games",
     "passed": true,
-    "details": "MLB games corpus verified present (28,072 tracked games 2015-2026)"
+    "details": "duplicate game_pks=0"
   },
   {
-    "name": "GAME_ID_UNIQUENESS",
-    "category": "DATA_INTEGRITY",
+    "name": "score_validity",
+    "category": "games",
     "passed": true,
-    "details": "0 duplicate game IDs found across all 28,072 tracked games"
+    "details": "completed=27957, negative scores=0, max home=29, max away=28"
   },
   {
-    "name": "SCORE_MARGIN_ARITHMETIC",
-    "category": "CALCULATION",
+    "name": "winner_consistency",
+    "category": "games",
     "passed": true,
-    "details": "Score margin checked on completed games; 0 calculation mismatches"
+    "details": "winner vs score inconsistencies=0"
   },
   {
-    "name": "GAMES_CHRONOLOGICAL_ORDER",
-    "category": "DATA_INTEGRITY",
+    "name": "no_0_0",
+    "category": "games",
     "passed": true,
-    "details": "Games verified strictly sorted chronologically: 2015-04-05 to 2026-09-20"
+    "details": "completed 0-0 games=0"
   },
   {
-    "name": "LEDGER_POPULATED",
-    "category": "AUDIT",
+    "name": "one_game_per_team_day",
+    "category": "games",
     "passed": true,
-    "details": "Found verified simulated bets in permanent immutable ledger"
+    "details": "same-day-same-opponent pairs sharing a game_pk=0; doubleheader games=828 (legitimate, distinct pks)"
   },
   {
-    "name": "BET_ID_UNIQUENESS",
-    "category": "AUDIT",
+    "name": "odds_winner_match",
+    "category": "odds x games",
     "passed": true,
-    "details": "0 duplicate bet IDs detected across all ledger entries"
+    "details": "matched=14590, winner agreement=14590 (100.00%)"
   },
   {
-    "name": "PNL_CALCULATION_ACCURACY",
-    "category": "AUDIT",
+    "name": "odds_join_match",
+    "category": "odds x games",
     "passed": true,
-    "details": "Audited bet ledger against American odds conversion; 0 math discrepancies"
+    "details": "all 15442 odds rows matched game_pk with identical date+teams (after WSH->WAS, OAK->ATH rename crosswalk)"
   },
   {
-    "name": "LEDGER_REQUIRED_FIELDS",
-    "category": "AUDIT",
+    "name": "ws_champions_verified",
+    "category": "postseason",
     "passed": true,
-    "details": "All required ledger fields present (bet_id, selection, odds_val, stake, result, pnl, clv)"
+    "details": "mirror WS champions match the independently documented list for all 11 seasons 2015-2025 (2015:KC, 2016:CHC, 2017:HOU, 2018:BOS, 2019:WAS, 2020:LAD, 2021:ATL, 2022:HOU, 2023:TEX, 2024:LAD, 2025:LAD)"
   },
   {
-    "name": "MARKET_TYPES_VALID",
-    "category": "AUDIT",
+    "name": "mirror_po_structural_integrity",
+    "category": "postseason",
     "passed": true,
-    "details": "Checked market types: ML, TOTAL, F5, RUNLINE, TEAM_TOTAL, KALSHI, PROP all verified"
+    "details": "440 mirror PO games 2015-2026; best-of-N length violations=0 (); play-after-clinch series=0 (); 0 PO rows marked Final with no score are left unsettled (e.g. the rain-suspended 2022 WS Game 3, which the mirror carries as a separate scoreless row \u2014 cross-checked against the 2022 WS game log: PHI 7-0 HOU on Nov 1 is Game 3's completion)."
   },
   {
-    "name": "LEADERBOARD_INTEGRITY",
-    "category": "AUDIT",
+    "name": "series_format_verified",
+    "category": "postseason",
     "passed": true,
-    "details": "Leaderboard contains 52 verified autonomous personas across all 17 research categories"
+    "details": "113 verified-corpus series respect best-of-N length limits (2012/2015 WC single game, 2020 WC/DS shorter)"
   },
   {
-    "name": "CATEGORY_COVERAGE",
-    "category": "AUDIT",
+    "name": "no_play_after_clinch_verified",
+    "category": "postseason",
     "passed": true,
-    "details": "Leaderboard covers 17/17 categories: Pitcher Leash, Bullpen, Platoon, Ballpark, Weather, Rest, ML Models, CLV, Kalshi, Managers, Umpires, Public, Props, F5, Run Line, Team Totals, Postseason"
+    "details": "no verified-corpus series contains a game after a team already had enough wins (113 series)"
   },
   {
-    "name": "ENVIRONMENT_ISOLATION_CHECK",
-    "category": "INTEGRITY",
+    "name": "series_state_complete",
+    "category": "series_state",
     "passed": true,
-    "details": "Regular Season (REG) and Postseason (POST, WC, DS, LCS, WS) bankrolls strictly segregated (Spec \u00a71, \u00a74)"
+    "details": "completed mirror po games without state=0"
   },
   {
-    "name": "FAIR_COIN_PROXY_LABELING",
-    "category": "INTEGRITY",
+    "name": "season_2020_short",
+    "category": "seasons",
     "passed": true,
-    "details": "All postseason ROIs strictly labeled as Fair-Coin Proxy; no fabricated market prices asserted"
+    "details": "2020 max home games per team=30 (pandemic 82-game season)"
   },
   {
-    "name": "POSTSEASON_FABRICATION_QUARANTINE",
-    "category": "DATA_INTEGRITY",
+    "name": "pbp_coverage",
+    "category": "pbp",
     "passed": true,
-    "details": "Primary mirror fabricated postseason rows successfully detected and quarantined (Check 16 PASS)"
+    "details": "2015+ completed games covered by play-by-play=27957/27957"
   },
   {
-    "name": "KALSHI_TRADES_INTEGRITY",
-    "category": "AUDIT",
+    "name": "team_count",
+    "category": "teams",
     "passed": true,
-    "details": "Found simulated Kalshi prediction trades with bid/ask spread, fee adjustment, and slippage"
+    "details": "active MLB teams=30 (expected 30)"
   },
   {
-    "name": "REGISTRY_ENTRIES_COUNT",
-    "category": "AUDIT",
+    "name": "live_2026_snapshot",
+    "category": "seasons",
     "passed": true,
-    "details": "Registry contains 32 probed data sources (18 VERIFIED_PRIMARY, 10 SECONDARY, 4 QUARANTINED/REJECTED)"
-  },
-  {
-    "name": "STRATEGY_VERSIONING_LINEAGE",
-    "category": "AUDIT",
-    "passed": true,
-    "details": "Found 18 strategies with documented parent_version lineages (v1 -> v2 -> v3)"
-  },
-  {
-    "name": "ZERO_LOOKAHEAD_VERIFICATION",
-    "category": "ANTI_LEAKAGE",
-    "passed": true,
-    "details": "Team Elo, rolling stats, and series states updated strictly post-game; zero lookahead bias verified"
+    "details": "2026 reg completed=2324 (last 2026-09-19), open/scheduled=106"
   }
 ]

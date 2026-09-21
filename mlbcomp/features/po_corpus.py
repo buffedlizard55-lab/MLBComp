@@ -1,15 +1,35 @@
-"""Verified postseason corpus (P1 + P2).
+"""Verified postseason corpus — built from the authentic mirror.
 
-P1  = 2025 postseason from the mirror (reality spot-checked: matchups,
-      series scores, and key game scores match documented results).
-      Full scores available -> usable for ML AND totals strategies.
-P2  = 2019-2024 reconstructed game winners (see
-      mlbcomp/data_recon/po_results.py for provenance and confidence).
-      Scores are None -> usable for ML settlement only, NOT for totals
-      or run-environment research.
+RE-AUDIT 2026-09-21 (supersedes the previous version of this module):
 
-The mirror's own 2019-2024 postseason rows are EXCLUDED (fabricated).
-2015-2018 are series-level supporting evidence only (not in this corpus).
+    The previous version built a 256-game corpus in which 2019-2024 came from
+    `data_recon/po_results.py`, a hand-written reconstruction of "game winners"
+    created because the mirror's postseason was believed to be fabricated.
+    Both halves of that were wrong:
+
+      1. The mirror is authentic.  Its World Series rows reproduce all eleven
+         independently documented champions 2015-2025 (see
+         ingest.baseballr.KNOWN_WS_CHAMPIONS).
+      2. The reconstruction itself contained invented results, e.g. it asserted
+         the Rays beat the Dodgers in the 2020 WS (the Dodgers won 4-2), the
+         Astros beat the Braves in 2021 (the Braves won 4-2), the Dodgers
+         swept the Rangers in 2023 (the Rangers beat Arizona 4-1; Los Angeles
+         was not in that Series), the Yankees beat the Dodgers in 2024 (the
+         Dodgers won 4-1), the Cardinals beat the Nationals in the 2019 NLCS
+         (Washington swept St. Louis 4-0) and the Nationals winning the 2019
+         WS 4-1 (they won 4-3).
+
+    Using invented winners as settlement labels is exactly the failure mode
+    this project exists to avoid, so the reconstruction is retired.  This
+    module now takes the postseason straight from the mirror — real game_pk,
+    real dates, real home/away, real scores — and *fails loudly* if the
+    resulting World Series champions do not match the independent list.
+
+Provenance tagging is retained (spec: preserve provenance):
+    provenance = "mirror"          every row (single source, cross-checked)
+    score_available = False        for rows the source marks Final but with
+                                   null scores (e.g. the rain-suspended
+                                   2022 WS Game 3) — never settled on score.
 """
 from __future__ import annotations
 
@@ -18,116 +38,62 @@ import sqlite3
 import pandas as pd
 
 from ..config import FEAT
-from ..data_recon.po_results import RECON, G1_HOST, WC1_HOST, standard_series_dates
-
-ABB_FIX = {"WSH": "WAS", "OAK": "ATH"}
-
-
-def _canon(a: str) -> str:
-    return ABB_FIX.get(a, a)
-
-
-def _home_away_pattern(rnd: str, n_games: int, g1_host: str, winner: str,
-                       runner_up: str) -> list[tuple[str, str]]:
-    """home/away abbr per game slot following the standard format."""
-    other = runner_up if g1_host == winner else winner
-    n_need = 4 if rnd in ("LCS", "WS") else (3 if rnd == "DS" and n_games >= 4 else 2)
-    home_at = set()
-    for i in range(1, n_games + 1):
-        if rnd == "WC":
-            home_at.add(i) if (i <= 2 or n_games == 1) else None
-        elif rnd == "DS" and n_games >= 4:  # BO5
-            home_at.add(i) if i in (1, 2, 5) else None
-        elif rnd == "DS":  # BO3 (2020)
-            home_at.add(i)
-        else:  # BO7
-            home_at.add(i) if i in (1, 2, 6, 7) else None
-    out = []
-    for i in range(1, n_games + 1):
-        if i in home_at:
-            out.append((g1_host, other))
-        else:
-            out.append((other, g1_host))
-    return out
+from ..ingest.baseballr import KNOWN_WS_CHAMPIONS
 
 
 def build_po_corpus() -> pd.DataFrame:
     conn = sqlite3.connect(FEAT.parent / "mlbcomp.db")
     teams = pd.read_sql("SELECT * FROM teams", conn)
     conn.close()
-    ab2id = {_canon(r.abbr): int(r.team_id) for r in teams.itertuples()}
+    id2abbr = {int(r.team_id): r.abbr for r in teams.itertuples()}
 
-    # ---------- P1: 2025 from mirror ----------
     g = pd.read_parquet(FEAT / "games.parquet")
     po = g[g.round_code.notna()].copy()
-    p1 = po[po.season == 2025][["game_pk", "season", "game_date", "round_code",
-                                 "home_team_id", "away_team_id", "home_score",
-                                 "away_score", "home_abbr", "away_abbr",
-                                 "winner_team_id", "league"]].copy()
-    p1["provenance"] = "mirror_verified_2025"
-    p1["confidence"] = "high"
-    p1["score_available"] = True
-    p1["source"] = "baseballr-data mirror (reality spot-checked)"
 
-    # ---------- P2: reconstructed 2019-2024 ----------
-    rows = []
-    idx = 0
-    for yr in (2019, 2020, 2021, 2022, 2023, 2024):
-        d = RECON[yr]
-        for (rnd, lg, winner, runner_up, game_winners, conf) in d["series"]:
-            n = len(game_winners)
-            if yr == 2020:
-                # Orlando bubble: no real home parks; 'home' is a
-                # placeholder (no home advantage applies in 2020 PO).
-                host = winner
-            elif rnd == "WC" and n == 1:
-                host = WC1_HOST[yr][winner]
-            else:
-                host = G1_HOST[yr][rnd][winner]
-            anchor = d["anchor"][rnd]
-            dates = standard_series_dates(anchor, rnd, n)
-            pattern = _home_away_pattern(rnd, n, host, winner, runner_up)
-            for gi, (w, (h, a), dt) in enumerate(zip(game_winners, pattern, dates)):
-                idx += 1
-                rows.append({
-                    "game_pk": -int(yr * 1000 + idx),
-                    "season": yr,
-                    "game_date": dt,
-                    "round_code": rnd,
-                    "home_abbr": _canon(h),
-                    "away_abbr": _canon(a),
-                    "home_team_id": ab2id[_canon(h)],
-                    "away_team_id": ab2id[_canon(a)],
-                    "home_score": None,
-                    "away_score": None,
-                    "winner_team_id": ab2id[_canon(w)],
-                    "league": lg if lg != "WS" else "WS",
-                    "provenance": "reconstructed_winners",
-                    "confidence": conf,
-                    "score_available": False,
-                    "source": "manual reconstruction from documented public results",
-                })
-    p2 = pd.DataFrame(rows)
-    p2["home_score"] = pd.to_numeric(p2["home_score"], errors="coerce")
-    p2["away_score"] = pd.to_numeric(p2["away_score"], errors="coerce")
+    cols = ["game_pk", "season", "game_date", "round_code", "league",
+            "home_team_id", "away_team_id", "home_score", "away_score",
+            "home_abbr", "away_abbr", "winner_team_id", "series_key",
+            "completed"]
+    missing = [c for c in cols if c not in po.columns]
+    if missing:
+        raise RuntimeError(f"games.parquet missing columns: {missing}")
+    out = po[cols].copy()
+    out["provenance"] = "mirror"
+    out["confidence"] = "high"
+    out["source"] = ("sportsdataverse/baseballr-data schedule "
+                     "(cross-checked vs KNOWN_WS_CHAMPIONS)")
 
-    out = pd.concat([p1, p2], ignore_index=True)
-    out["series_key"] = [
-        f"R{int(s)}:{r}:{l}:{min(int(a), int(b))}-{max(int(a), int(b))}"
-        for s, r, l, a, b in zip(out.season, out.round_code, out.league,
-                                 out.home_team_id, out.away_team_id)]
-    # keep the real mirror series_key for the 2025 P1 games
-    conn2 = sqlite3.connect(FEAT.parent / "mlbcomp.db")
-    mser = pd.read_sql("SELECT game_pk, series_key FROM games", conn2)
-    conn2.close()
-    real = mser[mser.game_pk.isin(p1.game_pk)].set_index("game_pk").series_key
-    out["series_key"] = [real.get(pk, sk) for pk, sk in
-                         zip(out.game_pk, out["series_key"])]
+    # A game is usable for score-based research only when both scores exist.
+    both = out.home_score.notna() & out.away_score.notna()
+    out["score_available"] = both & out.completed.astype(bool)
+
+    # ---- hard cross-check: the corpus must reproduce documented champions --
+    id2abbr_local = id2abbr
+    bad = []
+    for y, known in KNOWN_WS_CHAMPIONS.items():
+        ws = out[(out.season == y) & (out.round_code == "WS") &
+                 out.winner_team_id.notna()]
+        if not len(ws):
+            bad.append(f"{y}: no settled WS games in corpus (known={known})")
+            continue
+        last = ws.sort_values(["game_date", "game_pk"]).iloc[-1]
+        got = id2abbr_local.get(int(last.winner_team_id), "?")
+        if got != known:
+            bad.append(f"{y}: corpus={got} known={known}")
+    if bad:
+        raise RuntimeError(
+            "postseason corpus failed the independent champion cross-check: "
+            + "; ".join(bad))
+
     out.to_parquet(FEAT / "po_corpus.parquet", index=False)
-    print(f"po_corpus: {len(out)} games "
-          f"(P1 2025: {len(p1)}, P2 reconstructed: {len(p2)}) "
+    settled = int(out.winner_team_id.notna().sum())
+    print(f"po_corpus: {len(out)} postseason games from the mirror "
+          f"({settled} settled, {int(out.score_available.sum())} with scores) "
           f"-> {FEAT / 'po_corpus.parquet'}")
-    print(out.groupby(["season", "round_code"]).size().unstack(fill_value=0).to_string())
+    print("champion cross-check PASSED for "
+          f"{min(KNOWN_WS_CHAMPIONS)}-{max(KNOWN_WS_CHAMPIONS)}")
+    print(out[out.completed.astype(bool)]
+          .groupby(["season", "round_code"]).size().unstack(fill_value=0).to_string())
     return out
 
 
