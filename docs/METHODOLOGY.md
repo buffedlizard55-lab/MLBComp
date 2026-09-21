@@ -1,78 +1,91 @@
-# MLBComp — Methodology & Mathematical Foundations
+# MLBComp methodology
 
-## 1. Executive Summary & Design Principles
+## Operating contract
 
-MLBComp is an autonomous quantitative research and strategy competition platform designed to discover, evaluate, calibrate, and live paper-trade baseball betting strategies across multiple market types under strict point-in-time and zero-lookahead conditions.
+MLBComp is a research and paper-trading system. It never places a real order.
+A number is published as an observation only when it has a source, retrieval
+time, availability time and verification status. Unknown is a valid result.
 
-The system evaluates **58 autonomous personas** across **17 distinct quantitative disciplines**, covering:
-- Pitcher Leash & Starter ERA/FIP
-- Bullpen Usage & High-Leverage Fatigue
-- Platoon Advantage & Handedness Splits
-- Ballpark Factors & Altitude Adjustments
-- Wind, Humidor & Weather Dynamics
-- Rest, Travel & Getaway Day Situations
-- Statistical & Machine Learning Models (Elo, Pythagorean, Poisson, Bayesian, Logistic, Monte Carlo, LightGBM, Ensemble)
-- Market Movement & Steam Tracking (Reverse Line Movement, Pinnacle/Circa sharp tracking)
-- Kalshi CFTC Prediction Markets
-- Manager In-Game Strategy & Hook Tendencies
-- Umpire Strike Zone Tendencies
-- Public Contrarian & Line Fades
-- Player Prop Strategies (Pitcher Ks, Total Bases, Outs Recorded)
-- First 5 Innings (F5) Derivatives
-- Run Line (-1.5 / +1.5) & Alt Markets
-- Team Totals & Run Production
-- Postseason Environment & Series State
+## Environment isolation
 
----
+The normalized model environment is one of:
 
-## 2. Environment Segregation (Spec §1, §4, §32)
+- `REG`: regular season;
+- `POST`: all postseason, used for a cross-round view only;
+- `WC`, `DS`, `LCS`, `WS`: four separately versioned postseason competitions;
+- `ALL`: a display roll-up that keeps each component visible.
 
-MLBComp enforces a strict separation between Regular Season and Postseason competitions:
+A postseason model may use a regular-season prior, but it has its own feature
+gate, model version, experiments, strategy versions and performance rows. The
+round-specific models are never silently replaced by the all-postseason model.
 
-1. **Regular Season (`REG`):**
-   - Evaluated against **15,442 verified real market closing moneylines** from `cesar-dx/mlb-betting-ml` (2019–2025).
-   - Realized PnL and ROI reflect actual market pricing, closing line value (CLV), and bookmaker margin (vig).
-   - In-progress 2026 season games (through September 20, 2026) are tracked live as paper trades.
+## Point-in-time and anti-leakage rules
 
-2. **Postseason (`POST`, `WC`, `DS`, `LCS`, `WS`):**
-   - No verified market prices exist in reachable open-source historical records.
-   - Evaluated strictly using a **Fair-Coin Proxy**:
-     $$\text{ROI}_{\text{proxy}} = 2 \times (\text{Win\%} - 50\%)$$
-   - Represents pure model skill against a hypothetical zero-vig +100 market.
-   - Postseason results are never collapsed into a single leaderboard figure without explicitly preserving the environment breakdown.
+For a decision at `T`, a feature is eligible only when its source observation's
+`availability_time <= T`. The engine processes games in chronological order,
+updates team state after the decision loop, and creates series-state rows from
+the state before the game. Postseason Game 3 may use Games 1 and 2; it may not
+use Game 4, the final series result, a later lineup, a later injury report or
+a later price.
 
----
+Backtests use chronological train, validation and out-of-sample partitions.
+Randomly mixing future games into training is not allowed. A model change is a
+new strategy version and is compared against the previous version on the same
+future window.
 
-## 3. Mathematical Formulations
+## Postseason hierarchy
 
-### 3.1 FiveThirtyEight Calibrated MLB Elo Engine
-Team ratings update dynamically after each completed official game $t$:
-$$P(\text{Home Win}) = \frac{1}{1 + 10^{-(\text{Elo}_{\text{Home}} - \text{Elo}_{\text{Away}} + \text{HFA}) / 400}}$$
-where $\text{HFA} \approx 24.0$ Elo points (~53.3% home win frequency).
+The intended hierarchy is:
 
-The margin-of-victory multiplier $M$ scales update sensitivity:
-$$M = \frac{(|\text{Run Diff}| + 3)^{0.8}}{7.5 + 0.006 \times |\Delta \text{Elo}|}$$
-$$\text{Elo}_{t+1} = \text{Elo}_t + K \times M \times (\text{Outcome} - P)$$
+**career/multi-year → current season → late season → prior postseason →
+current postseason → current game**.
 
-Offseason regression reverts ratings 33% toward the historical mean (1500.0).
+The first levels can provide a prior. Current postseason and series-state
+signals update the prior with shrinkage/partial pooling. No direction is
+assumed for scoring, predictability, home advantage, managerial behavior,
+shorter pitching leashes, bullpen fatigue, rest, travel or market efficiency;
+each is a research question with a sample-size gate.
 
-### 3.2 Bivariate Poisson Scoring Model
-Independent Poisson distributions simulate score grids across $0 \le x, y \le 40$:
-$$P(\text{Home} = x, \text{Away} = y) = \frac{\lambda_H^x e^{-\lambda_H}}{x!} \times \frac{\lambda_A^y e^{-\lambda_A}}{y!}$$
-where:
-$$\lambda_H = \max\left(0.5, \frac{\text{RS}_H \times \text{RA}_A}{\text{League Mean}}\right), \quad \lambda_A = \max\left(0.5, \frac{\text{RS}_A \times \text{RA}_H}{\text{League Mean}}\right)$$
+Series state contains round, series key, game number, record, games remaining,
+elimination/clinching flags, home/away, previous results, rest, travel,
+probable/confirmed pitcher fields and bullpen availability when those fields
+are source-backed.
 
-### 3.3 Quarter-Kelly Risk Management
-Stakes are sized proportionally to calculated edge under fractional Kelly:
-$$f^* = \frac{b \cdot p - q}{b} \times 0.25$$
-subject to a hard constraint:
-$$\text{Stake} \le 0.05 \times \text{Current Bankroll}$$
+## Price, execution and settlement
 
----
+American odds are converted to decimal and implied probability. Two-way market
+probabilities are de-vigged only when both sides are observed. Kelly is a
+quarter-Kelly proposal capped at five percent of the strategy bankroll. This
+is risk-control math, not a claim that the model is correct.
 
-## 4. Anti-Leakage & Zero-Lookahead Contract
+A historical wager requires a verified quote at or before the decision time.
+It records bid, ask, liquidity, available size, observed timestamp, slippage
+and partial-fill status when the source provides them. Missing historical
+prices are not filled with +100 and do not enter ROI/PnL. A real game result
+without a quote is an `EVAL` row for calibration or directional skill only.
 
-- Chronological event ordering: Games are processed strictly by start time.
-- Contextual isolation: Features for game $t$ contain only data from timestamps $< t$.
-- Quarantined fabrication: Sportsdataverse schedule mirror's fabricated postseason games are isolated and excluded.
-- Reconstructed corpus integrity: 2019–2024 postseason games carry documented confidence ratings and are restricted to moneyline settlement.
+Settlement accepts only `W`, `L`, `P` or `V` and uses the market's documented
+settlement rule. Corrected settlement is an append-only correction event.
+
+## Metrics and conclusions
+
+Tracked metrics include calibration, Brier score, log loss, accuracy, verified
+ROI, PnL, closing-line value, drawdown, stake, liquidity/execution effects,
+sample size and round/market/environment slices. A result below the minimum
+sample is `INSUFFICIENT_SAMPLE`; positive small-sample results are not promoted.
+Postseason results without verified prices are never described as sportsbook
+ROI.
+
+## Research loop
+
+The catalog deliberately contains simple baselines and advanced hypotheses.
+After a run, the research table stores success/failure analysis, price/value,
+closing movement, data quality, signal-versus-variance assessment and the next
+hypothesis. Failed strategies remain visible and are not overwritten.
+
+## Data source registry
+
+The registry distinguishes a discovered URL, reachability, content validation,
+licensing and production eligibility. A source can be useful for discovery
+without being an automated dependency. GitHub commit/blob checksums and raw
+retrieval manifests are retained when a fetch occurs.

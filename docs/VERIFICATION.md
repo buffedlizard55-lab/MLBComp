@@ -1,24 +1,47 @@
-# MLBComp — Verification & Audit Trail
+# Verification and audit contract
 
-Automated audit check results across the complete MLBComp research and competition architecture.
+`python -m mlbcomp.verify.checks` writes 18 checks to
+`data/mlbcomp.db:verification_log` and the static exporter publishes them as
+`data/audit_checks.json`. A passing control means the rule is enforced; it
+does not mean source data is present.
 
-| Check ID | Category | Check Name | Status | Details |
-|---|---|---|---|---|
-| `CHK-01` | `DATA_INTEGRITY` | `GAMES_SOURCE_EXISTS` | **PASSED** | MLB games corpus verified present (28,072 tracked games 2015-2026). |
-| `CHK-02` | `DATA_INTEGRITY` | `GAME_ID_UNIQUENESS` | **PASSED** | 0 duplicate game IDs found across all 28,072 tracked games. |
-| `CHK-03` | `CALCULATION` | `SCORE_MARGIN_ARITHMETIC` | **PASSED** | Score margin checked on completed games; 0 calculation mismatches. |
-| `CHK-04` | `DATA_INTEGRITY` | `GAMES_CHRONOLOGICAL_ORDER` | **PASSED** | Games verified strictly sorted chronologically: 2015-04-05 to 2026-09-20. |
-| `CHK-05` | `AUDIT` | `LEDGER_POPULATED` | **PASSED** | Verified simulated bets populated in permanent immutable ledger. |
-| `CHK-06` | `AUDIT` | `BET_ID_UNIQUENESS` | **PASSED** | 0 duplicate bet IDs detected across all ledger entries. |
-| `CHK-07` | `AUDIT` | `PNL_CALCULATION_ACCURACY` | **PASSED** | Audited bet ledger against American odds conversion; 0 math discrepancies. |
-| `CHK-08` | `AUDIT` | `LEDGER_REQUIRED_FIELDS` | **PASSED** | All required ledger fields present (`bet_id`, `selection`, `odds_val`, `stake`, `result`, `pnl`, `clv`). |
-| `CHK-09` | `AUDIT` | `MARKET_TYPES_VALID` | **PASSED** | Checked market types: `ML`, `TOTAL`, `F5`, `RUNLINE`, `TEAM_TOTAL`, `KALSHI`, `PROP` all verified. |
-| `CHK-10` | `AUDIT` | `LEADERBOARD_INTEGRITY` | **PASSED** | Leaderboard contains 58 verified autonomous personas across all 17 research categories. |
-| `CHK-11` | `AUDIT` | `CATEGORY_COVERAGE` | **PASSED** | Leaderboard covers 17/17 categories without gaps. |
-| `CHK-12` | `INTEGRITY` | `ENVIRONMENT_ISOLATION_CHECK` | **PASSED** | Regular Season (`REG`) and Postseason (`POST`, `WC`, `DS`, `LCS`, `WS`) bankrolls strictly segregated (Spec §1, §4). |
-| `CHK-13` | `INTEGRITY` | `FAIR_COIN_PROXY_LABELING` | **PASSED** | All postseason ROIs strictly labeled as Fair-Coin Proxy; no fabricated market prices asserted. |
-| `CHK-14` | `DATA_INTEGRITY` | `POSTSEASON_FABRICATION_QUARANTINE` | **PASSED** | Primary mirror fabricated postseason rows successfully detected and quarantined (Check 16 PASS). |
-| `CHK-15` | `AUDIT` | `KALSHI_TRADES_INTEGRITY` | **PASSED** | Found simulated Kalshi prediction trades with bid/ask spread, fee adjustment, and slippage. |
-| `CHK-16` | `AUDIT` | `REGISTRY_ENTRIES_COUNT` | **PASSED** | Registry contains 32 probed data sources (18 `VERIFIED_PRIMARY`, 10 `SECONDARY`, 4 `QUARANTINED`/`REJECTED`). |
-| `CHK-17` | `AUDIT` | `STRATEGY_VERSIONING_LINEAGE` | **PASSED** | Found 18 strategies with documented `parent_version` lineages (`v1` → `v2` → `v3`). |
-| `CHK-18` | `ANTI_LEAKAGE` | `ZERO_LOOKAHEAD_VERIFICATION` | **PASSED** | Team Elo, rolling stats, and series states updated strictly post-game; zero lookahead bias verified. |
+| Check | Purpose |
+|---|---|
+| `schema_required_tables` | normalized stores and audit tables exist |
+| `source_registry_fields` | registry has URL, type, depth, access, cost, restrictions, license, reliability, granularity, automation, date, status and limitations |
+| `strategy_environment_isolation` | only REG/POST/WC/DS/LCS/WS/ALL environments are accepted |
+| `strategy_versions_present` | persisted strategies have immutable version metadata |
+| `game_pk_unique` | source game IDs are not duplicated |
+| `score_integrity` | completed scores are present and non-negative |
+| `winner_integrity` | winner agrees with the verified score |
+| `quote_price_integrity` | observed American prices are finite and non-zero |
+| `quote_availability_gate` | verified quotes have an observed timestamp |
+| `no_unverified_pnl` | EVAL/PROPOSED/unverified rows cannot carry non-zero PnL |
+| `ledger_hash_chain` | append-only event hashes reconstruct correctly |
+| `ledger_append_only_triggers` | SQLite blocks UPDATE and DELETE on immutable ledger events |
+| `prediction_cutoff_present` | every prediction records a data cutoff |
+| `postseason_round_codes` | postseason is limited to WC/DS/LCS/WS |
+| `series_state_pre_game` | series counters are valid before the game |
+| `no_settlement_without_result` | settled rows have W/L/P/V |
+| `no_live_execution_connector` | no real-money order integration is present |
+| `issue_queue_available` | missing/conflicting/broken data has a durable queue |
+
+## Provenance chain
+
+For a source-backed field the chain is:
+
+`source → retrieval time → availability time → derived value → feature snapshot
+hash → model output → decision → observed quote/execution → settlement`.
+
+The `source_observations`, `predictions`, `market_quotes`,
+`immutable_ledger`, `executions`, `settlements`, `corrections` and `audit_log`
+tables hold the links. An absent link causes the relevant data gate to fail;
+it is not filled from a guess.
+
+## Current checkout
+
+The committed static snapshot is intentionally `NO_SOURCE_SNAPSHOT` until the
+fetcher and validators are run. It therefore contains no historical wager or
+performance claim. Registry rows are discovery records with
+`NOT_VERIFIED` status. This is safer than presenting a plausible but
+unreproducible scorecard.

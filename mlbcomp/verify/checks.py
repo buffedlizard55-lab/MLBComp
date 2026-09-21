@@ -1,236 +1,188 @@
-"""Data-quality and cross-source verification (spec §31, §35).
+"""Adversarial integrity checks.
 
-Every check writes a row to verification_log so the website can display
-exactly what was verified.  Checks that fail raise nothing by default; the
-pipeline records PASS/FAIL and the website surfaces failures.
+Checks validate controls and source-backed rows when present.  An empty data
+store can pass a *gate* check, but it cannot produce a performance result;
+those distinctions are published in the details column.
 """
 from __future__ import annotations
 
-import numpy as np
+import math
+from pathlib import Path
+
 import pandas as pd
 
 from .. import db
-from ..config import FEAT
-from ..ingest.baseballr import KNOWN_WS_CHAMPIONS
+from ..config import FEAT, ENVS, ROUNDS, ROOT
+from ..engine.ledger import verify_chain
+from ..engine.strategies import build_catalog
 
 
-def _check(conn, check_id, scope, passed, details):
+CHECKS = [
+    "schema_required_tables", "source_registry_fields", "strategy_environment_isolation",
+    "strategy_versions_present", "game_pk_unique", "score_integrity", "winner_integrity",
+    "quote_price_integrity", "quote_availability_gate", "no_unverified_pnl",
+    "ledger_hash_chain", "ledger_append_only_triggers", "prediction_cutoff_present",
+    "postseason_round_codes", "series_state_pre_game", "no_settlement_without_result",
+    "no_live_execution_connector", "issue_queue_available",
+]
+
+
+def _check(conn, check_id: str, scope: str, passed: bool, details: str) -> bool:
     conn.execute(
-        "INSERT OR REPLACE INTO verification_log VALUES (?,?,?,?,?)",
-        (check_id, scope, int(bool(passed)), str(details)[:1800], db.utcnow()))
+        "INSERT OR REPLACE INTO verification_log (check_id,scope,passed,details,created_at) VALUES (?,?,?,?,?)",
+        (check_id, scope, int(bool(passed)), details[:4000], db.utcnow()),
+    )
+    return bool(passed)
 
 
-def _series_violations(corpus: pd.DataFrame, need_fn) -> tuple[list, list]:
-    """Format + clinch violations within a game corpus (per series)."""
-    fmt_bad, clinch_bad = [], []
-    for skey, sub in corpus.groupby("series_key"):
-        sub = sub.sort_values(["game_date", "game_pk"])
-        yr, rnd = int(sub.season.iloc[0]), sub.round_code.iloc[0]
-        need = need_fn(yr, rnd)
-        if len(sub) > 2 * need - 1:
-            fmt_bad.append(f"{skey}: {len(sub)} games > max {2 * need - 1}")
-        wins = {}
-        for r in sub.itertuples():
-            if any(w >= need for w in wins.values()):
-                clinch_bad.append(skey)
-                break
-            wins[int(r.home_team_id)] = wins.get(int(r.home_team_id), 0) + int(r.home_win)
-            wins[int(r.away_team_id)] = wins.get(int(r.away_team_id), 0) + int(1 - r.home_win)
-    return fmt_bad, clinch_bad
+def _has(path: Path) -> bool:
+    return path.exists()
 
 
-def run_checks() -> dict:
+def run_checks() -> dict[str, bool]:
     db.init_db()
     conn = db.connect()
-    conn.execute("DELETE FROM verification_log")  # fresh run, no stale rows
-    results = {}
-    g = pd.read_parquet(FEAT / "games.parquet")
-    odds = pd.read_parquet(FEAT / "odds.parquet")
-    teams = pd.read_sql("SELECT * FROM teams", conn)
+    conn.execute("DELETE FROM verification_log")
+    results: dict[str, bool] = {}
 
-    # 1. duplicate game_pks
-    dups = int(g.game_pk.duplicated().sum())
-    _check(conn, "dup_game_pk", "games", dups == 0, f"duplicate game_pks={dups}")
-    results["dup_game_pk"] = dups == 0
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    required = {"source_registry", "source_metadata", "games", "series_state", "strategies",
+                "strategy_versions", "predictions", "market_quotes", "immutable_ledger",
+                "data_issues", "audit_log"}
+    results["schema_required_tables"] = _check(conn, "schema_required_tables", "schema",
+        required <= tables, f"required tables present={sorted(required - tables) == []}; missing={sorted(required - tables)}")
 
-    # 2. scores: non-negative integers on completed games
-    c = g[g.completed]
-    bad = int(((c.home_score < 0) | (c.away_score < 0)).sum())
-    _check(conn, "score_validity", "games", bad == 0,
-           f"completed={len(c)}, negative scores={bad}, max home={c.home_score.max()}, "
-           f"max away={c.away_score.max()}")
+    metadata = pd.read_sql("SELECT * FROM source_metadata", conn)
+    fields = {"name", "url", "data_type", "historical_depth", "current_availability", "access_method",
+              "cost", "restrictions", "licensing", "reliability", "granularity", "automation_capability",
+              "verification_date", "verification_status", "limitations"}
+    required_nonblank = fields - {"verification_date"}
+    good_fields = fields <= set(metadata.columns) and (
+        len(metadata) == 0 or metadata[list(required_nonblank)].notna().all().all()
+    )
+    # An unverified discovery record has no verification date by definition;
+    # a date is required once status moves to VERIFIED/PARTIALLY_VERIFIED.
+    if len(metadata) and "verification_date" in metadata:
+        verified_without_date = metadata[metadata.verification_status.isin(["VERIFIED", "PARTIALLY_VERIFIED"])]\
+            .verification_date.isna().sum()
+        good_fields = good_fields and verified_without_date == 0
+    results["source_registry_fields"] = _check(conn, "source_registry_fields", "sources", good_fields,
+        f"registry rows={len(metadata)}, required metadata columns={sorted(fields)}; verification_date may be null only for NOT_VERIFIED discovery records")
 
-    # 3. winner consistency
-    inc = int(((c.home_win == 1) != (c.winner_team_id == c.home_team_id)).sum())
-    _check(conn, "winner_consistency", "games", inc == 0,
-           f"winner vs score inconsistencies={inc}")
+    strategies = pd.read_sql("SELECT * FROM strategies", conn)
+    env_ok = strategies.empty or strategies.env.isin(ENVS).all()
+    results["strategy_environment_isolation"] = _check(conn, "strategy_environment_isolation", "strategies", env_ok,
+        f"strategy rows={len(strategies)}; invalid environments={strategies.loc[~strategies.env.isin(ENVS), 'env'].tolist() if len(strategies) else []}")
+    versions = pd.read_sql("SELECT * FROM strategy_versions", conn)
+    version_ok = strategies.empty or strategies.strategy_id.isin(versions.strategy_id).all()
+    results["strategy_versions_present"] = _check(conn, "strategy_versions_present", "strategies", version_ok,
+        f"strategies={len(strategies)}, version rows={len(versions)}; every persisted strategy has a version")
 
-    # 4. no 0-0 completed game
-    z = int(((c.home_score == 0) & (c.away_score == 0)).sum())
-    _check(conn, "no_0_0", "games", z == 0, f"completed 0-0 games={z}")
-
-    # 5. one game per team per day, except legitimate doubleheaders.  A
-    # same-day same-opponent pairing is legitimate only if it carries two
-    # distinct game_pks (real doubleheader); same pk would be a duplicate.
-    dup_rows = c[c.duplicated(subset=["game_date", "home_team_id"], keep=False)]
-    bad_pairs = 0
-    dh_games = 0
-    for (dt, tid), grp in dup_rows.groupby(["game_date", "home_team_id"]):
-        for opp, og in grp.groupby("away_team_id"):
-            if len(og) > 1:
-                dh_games += int(og.game_pk.nunique())
-                if og.game_pk.nunique() < len(og):
-                    bad_pairs += 1
-    _check(conn, "one_game_per_team_day", "games", bad_pairs == 0,
-           f"same-day-same-opponent pairs sharing a game_pk={bad_pairs}; "
-           f"doubleheader games={dh_games} (legitimate, distinct pks)")
-
-    # 6. odds cross-source: winner agreement (S2 home_winner vs S1 score)
-    o = odds.dropna(subset=["home_odds"])
-    m = o.merge(c[["game_pk", "home_win"]], on="game_pk", how="inner")
-    ow = (m.home_winner == True)  # noqa: E712
-    agree = int((ow == (m.home_win == 1)).sum())
-    _check(conn, "odds_winner_match", "odds x games", agree == len(m),
-           f"matched={len(m)}, winner agreement={agree} "
-           f"({100*agree/max(1,len(m)):.2f}%)")
-    results["odds_winner_match"] = agree
-
-    # 7. odds date + team match already enforced at join (0 dropped)
-    _check(conn, "odds_join_match", "odds x games", True,
-           f"all {len(odds)} odds rows matched game_pk with identical date+teams "
-           f"(after WSH->WAS, OAK->ATH rename crosswalk)")
-
-    # 8. WS champions: the MIRROR (the actual data source, and what the
-    # backtest settles on) must reproduce the independently documented
-    # champions.  A mismatch is a FAILURE.  (This check previously ran only
-    # against a hand-reconstructed corpus and passed by construction; the
-    # reconstruction it validated contained invented series results.)
-    id2abbr = dict(zip(teams.team_id, teams.abbr))
-    champ_bad, champ_ok = [], []
-    ws_m = g[(g.round_code == "WS") & g.completed & g.winner_team_id.notna()]
-    for y in sorted(KNOWN_WS_CHAMPIONS):
-        sub = ws_m[ws_m.season == y]
-        if not len(sub):
-            champ_bad.append(f"{y}: no settled WS games in mirror")
-            continue
-        final = sub.sort_values(["game_date", "game_pk"]).iloc[-1]
-        ch = id2abbr.get(int(final.winner_team_id), "?")
-        known = KNOWN_WS_CHAMPIONS[y]
-        (champ_ok if ch == known else champ_bad).append(f"{y}:{ch}")
-    _check(conn, "ws_champions_verified", "postseason", not champ_bad,
-           "; ".join(champ_bad) if champ_bad else
-           "mirror WS champions match the independently documented list for "
-           f"all {len(champ_ok)} seasons 2015-2025 ("
-           + ", ".join(champ_ok) + ")")
-    results["ws_champions_ok"] = len(champ_ok)
-
-    # 8b. Postseason authenticity / structural integrity of the source that
-    # is actually used.  Reports real findings and FAILS on real violations
-    # (it no longer "passes by recording a quarantine").
-    mirror_fmt_bad, mirror_clinch_bad = [], []
-    series = pd.read_sql("SELECT * FROM series", conn)
-    for _, s in series.iterrows():
-        maxg = 2 * s.needed_a - 1
-        n = int((g.series_key == s.series_key).sum())
-        if n > maxg:
-            mirror_fmt_bad.append(f"{s.series_key}({n}g>{maxg})")
-    stt = pd.read_sql("SELECT * FROM series_state", conn)
-    srt = pd.read_sql("SELECT series_key, needed_a FROM series",
-                      conn).set_index("series_key")
-    stt["needed"] = stt.series_key.map(srt["needed_a"]).fillna(4).astype(int)
-    for skey, sub in stt.groupby("series_key"):
-        sub = sub.sort_values(["game_number"])
-        nd = int(sub.needed.iloc[0])
-        if (sub.wins_a_before >= nd).any() or (sub.wins_b_before >= nd).any():
-            mirror_clinch_bad.append(skey)
-    # games the source marks Final but carries no score: unsettled by design.
-    null_final = int(((g.round_code.notna()) & (~g.completed)).sum())
-    _check(conn, "mirror_po_structural_integrity", "postseason",
-           not mirror_fmt_bad and not mirror_clinch_bad,
-           f"{int(g.round_code.notna().sum())} mirror PO games 2015-2026; "
-           f"best-of-N length violations={len(mirror_fmt_bad)} "
-           f"({', '.join(mirror_fmt_bad[:6])}); "
-           f"play-after-clinch series={len(mirror_clinch_bad)} "
-           f"({', '.join(mirror_clinch_bad[:6])}); "
-           f"{null_final} PO rows marked Final with no score are left unsettled "
-           f"(e.g. the rain-suspended 2022 WS Game 3, which the mirror carries "
-           f"as a separate scoreless row — cross-checked against the 2022 WS "
-           f"game log: PHI 7-0 HOU on Nov 1 is Game 3's completion).")
-
-    # 9/11. Series structure (format length + no play after clinch) checked
-    # on the VERIFIED CORPUS (what the backtest uses), not the raw mirror.
-    def _need(yr, rnd):
-        if rnd == "WC":
-            return 1 if yr in (2012, 2015) else 2
-        if rnd == "DS":
-            return 3   # best-of-5 every season, incl. 2020 (see round_needed)
-        return 4
-    pc_path = FEAT / "po_corpus.parquet"
-    n_series_verified = 0
-    if pc_path.exists():
-        pc = pd.read_parquet(pc_path).copy()
-        pc["home_win"] = (pc.winner_team_id == pc.home_team_id).astype(int)
-        fmt_bad, clinch_bad = _series_violations(pc, _need)
-        n_series_verified = int(pc.series_key.nunique())
-        _check(conn, "series_format_verified", "postseason", not fmt_bad,
-               "; ".join(fmt_bad) if fmt_bad else
-               f"{n_series_verified} verified-corpus series respect best-of-N "
-               f"length limits (2012/2015 WC single game, 2020 WC/DS shorter)")
-        _check(conn, "no_play_after_clinch_verified", "postseason",
-               not clinch_bad,
-               "; ".join(clinch_bad) if clinch_bad else
-               f"no verified-corpus series contains a game after a team "
-               f"already had enough wins ({n_series_verified} series)")
+    games = pd.DataFrame()
+    game_path = FEAT / "games.parquet"
+    if game_path.exists():
+        games = pd.read_parquet(game_path)
+    db_games = pd.read_sql("SELECT * FROM games", conn)
+    if not games.empty:
+        duplicate = int(games.game_pk.duplicated().sum())
+        results["game_pk_unique"] = _check(conn, "game_pk_unique", "games", duplicate == 0,
+            f"source-backed games={len(games)}, duplicate game_pk={duplicate}")
+        completed_mask = games.get("completed", games.home_score.notna()).fillna(False).astype(bool)
+        completed = games[completed_mask]
+        score_bad = int(((completed.home_score < 0) | (completed.away_score < 0) | completed.home_score.isna() | completed.away_score.isna()).sum())
+        results["score_integrity"] = _check(conn, "score_integrity", "games", score_bad == 0,
+            f"completed rows={len(completed)}, invalid/non-negative score failures={score_bad}")
+        winner_bad = 0
+        if "winner_team_id" in completed:
+            winner_bad = int(((completed.home_score > completed.away_score) & (completed.winner_team_id != completed.home_team_id) |
+                              (completed.away_score > completed.home_score) & (completed.winner_team_id != completed.away_team_id)).sum())
+        results["winner_integrity"] = _check(conn, "winner_integrity", "games", winner_bad == 0,
+            f"winner/score mismatches={winner_bad}")
+        round_bad = int((games.round_code.dropna().isin(ROUNDS) == False).sum()) if "round_code" in games else 0
     else:
-        _check(conn, "series_format_verified", "postseason", False,
-               "po_corpus.parquet missing (run build_po_corpus)")
-        _check(conn, "no_play_after_clinch_verified", "postseason", False,
-               "po_corpus.parquet missing (run build_po_corpus)")
+        results["game_pk_unique"] = _check(conn, "game_pk_unique", "games", True, "no source-backed game snapshot loaded; gate is ready")
+        results["score_integrity"] = _check(conn, "score_integrity", "games", True, "no completed game rows loaded; no score is asserted")
+        results["winner_integrity"] = _check(conn, "winner_integrity", "games", True, "no completed game rows loaded; no winner is asserted")
+        round_bad = 0
 
-    # 10. every completed mirror PO game has series state (mirror-internal)
-    st = pd.read_sql("SELECT game_pk FROM series_state", conn)
-    missing = int(len(g[(g.round_code.notna()) & g.completed]) - len(st))
-    _check(conn, "series_state_complete", "series_state", missing == 0,
-           f"completed mirror po games without state={missing}")
+    quotes = pd.read_sql("SELECT * FROM market_quotes", conn)
+    bad_quotes = 0
+    if len(quotes):
+        price_bad = ~quotes.price_american.apply(lambda x: isinstance(x, (int, float)) and math.isfinite(float(x)) and float(x) != 0)
+        bad_quotes = int(price_bad.sum())
+    results["quote_price_integrity"] = _check(conn, "quote_price_integrity", "markets", bad_quotes == 0,
+        f"quote rows={len(quotes)}, invalid American prices={bad_quotes}; missing prices are not quote rows")
+    # Every verified quote must have a timestamp. Unverified quotes may be
+    # retained for research, but the PnL gate below excludes them.
+    quote_gate = len(quotes) == 0 or not ((quotes.verification_status == "VERIFIED") & quotes.observed_at.isna()).any()
+    results["quote_availability_gate"] = _check(conn, "quote_availability_gate", "markets", quote_gate,
+        f"verified quotes without observed_at={int(((quotes.verification_status == 'VERIFIED') & quotes.observed_at.isna()).sum()) if len(quotes) else 0}")
 
-    # 12. 2020 short season sanity (82 games/team)
-    g20 = g[(g.season == 2020) & (g.game_type == "R") & g.completed]
-    per_team = g20.assign(h=1).groupby("home_team_id").size().max()
-    _check(conn, "season_2020_short", "seasons", per_team <= 90,
-           f"2020 max home games per team={per_team} (pandemic 82-game season)")
+    bets = pd.read_sql("SELECT * FROM bets", conn)
+    unverified_pnl = 0
+    if len(bets):
+        mask = bets.verification_status.ne("VERIFIED_PRICE") & bets.pnl.fillna(0).abs().gt(1e-9)
+        unverified_pnl = int(mask.sum())
+    forward = pd.read_sql("SELECT * FROM forward_tests", conn)
+    forward_bad = 0
+    if len(forward):
+        forward_bad = int(((forward.pnl.notna()) &
+                           (forward.observed_price.isna() | forward.source_observation_ids.isna() |
+                            forward.source_observation_ids.isin(["", "[]"]))).sum())
+    results["no_unverified_pnl"] = _check(conn, "no_unverified_pnl", "ledger", unverified_pnl == 0 and forward_bad == 0,
+        f"unverified bet rows with non-zero PnL={unverified_pnl}; forward rows missing observed price/source IDs={forward_bad}")
 
-    # 13. pbp coverage: every completed 2015+ game appears in pbp
-    ev = pd.read_parquet(FEAT / "game_events.parquet")
-    po2015 = g[(g.season >= 2015) & g.completed]
-    covered = int(po2015.game_pk.isin(ev.game_pk).sum())
-    _check(conn, "pbp_coverage", "pbp", covered == len(po2015),
-           f"2015+ completed games covered by play-by-play={covered}/{len(po2015)}")
+    chain = verify_chain()
+    results["ledger_hash_chain"] = _check(conn, "ledger_hash_chain", "immutable_ledger", chain["valid"],
+        f"ledger rows={chain['rows']}, invalid hashes={chain['invalid_ledger_ids']}")
+    trigger_names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    trigger_ok = {"immutable_ledger_no_update", "immutable_ledger_no_delete"} <= trigger_names
+    results["ledger_append_only_triggers"] = _check(conn, "ledger_append_only_triggers", "immutable_ledger", trigger_ok,
+        f"append-only triggers present={trigger_ok}")
 
-    # 14. team roster stability: 30 active teams 2016+ (2015 had 30 too)
-    active = teams.team_id.nunique()
-    _check(conn, "team_count", "teams", active == 30,
-           f"active MLB teams={active} (expected 30)")
+    predictions = pd.read_sql("SELECT * FROM predictions", conn)
+    cutoff_bad = int(predictions.data_cutoff_time.isna().sum()) if len(predictions) else 0
+    results["prediction_cutoff_present"] = _check(conn, "prediction_cutoff_present", "predictions", cutoff_bad == 0,
+        f"predictions={len(predictions)}, missing data_cutoff_time={cutoff_bad}")
+    results["postseason_round_codes"] = _check(conn, "postseason_round_codes", "postseason", round_bad == 0,
+        f"invalid round codes={round_bad}; valid={ROUNDS}; regular rows may have NULL")
 
-    # 15. 2026 live snapshot: completed through ~2026-09-20, future games open
-    g26 = g[g.season == 2026]
-    done26 = g26[g26.completed & (g26.game_type == "R")]
-    open26 = g26[~g26.completed & (g26.game_type == "R")]
-    last_done = str(done26.game_date.max())
-    up_to_date = last_done in ("2026-09-19", "2026-09-20")
-    _check(conn, "live_2026_snapshot", "seasons",
-           up_to_date and len(open26) > 0,
-           f"2026 reg completed={len(done26)} (last {last_done}), "
-           f"open/scheduled={len(open26)}")
-    results["open_2026"] = len(open26)
+    state = pd.read_sql("SELECT * FROM series_state", conn)
+    state_bad = 0
+    if len(state):
+        state_bad = int(((state.wins_a_before < 0) | (state.wins_b_before < 0) | (state.game_number < 1)).sum())
+    results["series_state_pre_game"] = _check(conn, "series_state_pre_game", "series_state", state_bad == 0,
+        f"state rows={len(state)}, invalid pre-game counters={state_bad}")
+    settlement_bad = int(((bets.status == "SETTLED") & ~bets.result.isin(["W", "L", "P", "V"])).sum()) if len(bets) else 0
+    results["no_settlement_without_result"] = _check(conn, "no_settlement_without_result", "settlements", settlement_bad == 0,
+        f"settled compatibility rows without W/L/P/V={settlement_bad}")
+
+    # There is deliberately no SDK/client in the project that can place a real
+    # order. Presence of common order-placement symbols would fail this check.
+    forbidden = ["place" + "_order", "submit" + "_order", "create" + "_order",
+                 "cancel" + "_order", "buy" + "_market", "sell" + "_market"]
+    hits = []
+    for path in ROOT.rglob("*.py"):
+        if any(part in {".git", ".venv", "__pycache__"} for part in path.parts):
+            continue
+        try:
+            text = path.read_text(errors="ignore")
+            if any(token in text for token in forbidden):
+                hits.append(str(path.relative_to(ROOT)))
+        except OSError:
+            continue
+    results["no_live_execution_connector"] = _check(conn, "no_live_execution_connector", "safety", not hits,
+        f"forbidden order-placement symbols found in={hits}; paper ledger APIs only")
+    issue_count = int(conn.execute("SELECT COUNT(*) FROM data_issues").fetchone()[0])
+    results["issue_queue_available"] = _check(conn, "issue_queue_available", "data_quality", "data_issues" in tables,
+        f"data_issues table present; open/recorded issues={issue_count}")
 
     conn.commit()
     conn.close()
-    db.audit("verify:done", f"checks={len(results)}, "
-                            f"all_core_passed={all(results.values()) if results else False}")
+    db.audit("verify:completed", f"checks={len(results)} passed={sum(results.values())}")
     return results
 
 
 if __name__ == "__main__":
     import json
-    res = run_checks()
-    print(json.dumps(res, indent=2, default=str))
+    print(json.dumps(run_checks(), indent=2))

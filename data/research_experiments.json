@@ -1,425 +1,317 @@
 [
   {
-    "title": "Q01 \u2014 Is the postseason run environment (average total runs) different from the regular season?",
-    "status": "CONTRADICTED",
-    "hypothesis": "Is the postseason run environment (average total runs) different from the regular season?",
-    "sample_size": 47,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "po25_avg_total": 8.02,
-      "reg25_avg_total": 8.89,
-      "delta": -0.87
-    },
-    "conclusion": "2025 PO avg total 8.02 vs 2025 REG 8.89 (delta -0.87). P1 (real scores) only; single-season sample -> directional, not conclusive.",
-    "action_taken": "verdict recorded as CONTRADICTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q02 \u2014 Is postseason scoring more or less volatile (std of run margin) than REG?",
-    "status": "CONTRADICTED",
-    "hypothesis": "Is postseason scoring more or less volatile (std of run margin) than REG?",
-    "sample_size": 47,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "po25_margin_std": 2.22,
-      "reg25_margin_std": 2.87,
-      "delta": -0.65
-    },
-    "conclusion": "2025 PO margin std 2.22 vs 2025 REG 2.87 (delta -0.65); single season.",
-    "action_taken": "verdict recorded as CONTRADICTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q03 \u2014 Is home advantage larger or smaller in the postseason than in REG?",
-    "status": "INCONCLUSIVE",
-    "hypothesis": "Is home advantage larger or smaller in the postseason than in REG?",
-    "sample_size": 440,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "po_home_win": 0.5364,
-      "reg_home_win": 0.5329,
-      "delta": 0.0035
-    },
-    "conclusion": "PO home-win 0.536 (2019-25 corpus, P1+P2 winners) vs REG 0.533 (2015-25). Directional; P2 games have no scores but known winners, sufficient for home-win frequency.",
-    "action_taken": "verdict recorded as INCONCLUSIVE (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q04 \u2014 Does late-season (September) form predict postseason games better than full-season strength?",
-    "status": "CONTRADICTED",
-    "hypothesis": "Does late-season (September) form predict postseason games better than full-season strength?",
-    "sample_size": 404,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "sep15": 0.5321782178217822,
-      "elo_baseline": 0.5389830508474577
-    },
-    "conclusion": "September-15 form on PO: 0.532 vs Elo baseline 0.539; Brier 0.3248 vs 0.2482. Late-season form adds no clear edge on PO in this sample (and calibrates poorly).",
-    "action_taken": "verdict recorded as CONTRADICTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q05 \u2014 Does the regular-season model transfer unchanged to the postseason (Model A)?",
-    "status": "SUPPORTED",
-    "hypothesis": "Does the regular-season model transfer unchanged to the postseason (Model A)?",
-    "sample_size": 295,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "n": 295,
-      "win_pct": 0.5389830508474577,
-      "fair_coin_roi": 0.07796610169491536
-    },
-    "conclusion": "Model A (REG Elo unchanged on PO): win rate 0.539 on 295 PO games (fair-coin proxy ROI +7.8%). Baseline is strong.",
-    "action_taken": "verdict recorded as SUPPORTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q06 \u2014 Does REG + late-season adjustment (Model B) beat Model A on PO?",
-    "status": "CONTRADICTED",
-    "hypothesis": "Does REG + late-season adjustment (Model B) beat Model A on PO?",
-    "sample_size": 404,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "B": {
-        "n": 404,
-        "win_pct": 0.5321782178217822,
-        "fair_coin_roi": 0.06435643564356441
-      },
-      "A": {
-        "n": 295,
-        "win_pct": 0.5389830508474577,
-        "fair_coin_roi": 0.07796610169491536
-      }
-    },
-    "conclusion": "Model B (late-season form) 0.532 vs Model A 0.539. Brier: B=0.3248 vs A=0.2482 \u2014 B's win rate similar but probabilities poorly calibrated.",
-    "action_taken": "verdict recorded as CONTRADICTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q07 \u2014 Does a dedicated postseason model with series state (Model C) beat Model A?",
-    "status": "SUPPORTED",
-    "hypothesis": "Does a dedicated postseason model with series state (Model C) beat Model A?",
-    "sample_size": 83,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "C": {
-        "n": 83,
-        "win_pct": 0.5421686746987951,
-        "fair_coin_roi": 0.0843373493975903
-      },
-      "A": {
-        "n": 295,
-        "win_pct": 0.5389830508474577,
-        "fair_coin_roi": 0.07796610169491536
-      }
-    },
-    "conclusion": "Model C (dedicated PO + series state, elimination/clinching games only) 0.542 on 83 games vs A 0.539; Brier C=0.2482. Promising on the subset it covers; sample small.",
-    "action_taken": "verdict recorded as SUPPORTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q08 \u2014 Do round-specific models (Model D) outperform a single POST model, per round?",
-    "status": "INCONCLUSIVE",
-    "hypothesis": "Do round-specific models (Model D) outperform a single POST model, per round?",
-    "sample_size": 305,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "WC": 0.5833333333333334,
-      "DS": 0.5461538461538461,
-      "LCS": 0.4939759036144578,
-      "WS": 0.5227272727272727
-    },
-    "conclusion": "Model D round-specific win rates: WC 0.583, DS 0.546, LCS 0.494, WS 0.523. Strong in WC, weak/negative in WS \u2014 round matters a lot; a single POST model is a compromise.",
-    "action_taken": "verdict recorded as INCONCLUSIVE (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q09 \u2014 Does the hierarchical REG-prior/PO-likelihood model (Model E) beat Model A?",
-    "status": "SUPPORTED",
-    "hypothesis": "Does the hierarchical REG-prior/PO-likelihood model (Model E) beat Model A?",
-    "sample_size": 352,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "E": {
-        "n": 352,
-        "win_pct": 0.5653409090909091,
-        "fair_coin_roi": 0.13068181818181812
-      },
-      "A": {
-        "n": 295,
-        "win_pct": 0.5389830508474577,
-        "fair_coin_roi": 0.07796610169491536
-      }
-    },
-    "conclusion": "Model E (hierarchical) 0.565 on 352 games vs A 0.539; Brier E=0.2614 vs A=0.2482.",
-    "action_taken": "verdict recorded as SUPPORTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q10 \u2014 Is the World Series the most market-efficient / hardest round to beat?",
-    "status": "CONTRADICTED",
-    "hypothesis": "Is the World Series the most market-efficient / hardest round to beat?",
-    "sample_size": 44,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "WS": {
-        "n": 44,
-        "win_pct": 0.5227272727272727,
-        "fair_coin_roi": 0.045454545454545414
-      },
-      "WC": {
-        "n": 48,
-        "win_pct": 0.5833333333333334,
-        "fair_coin_roi": 0.16666666666666674
-      },
-      "LCS": {
-        "n": 83,
-        "win_pct": 0.4939759036144578,
-        "fair_coin_roi": -0.012048192771084376
-      },
-      "DS": {
-        "n": 130,
-        "win_pct": 0.5461538461538461,
-        "fair_coin_roi": 0.0923076923076922
-      }
-    },
-    "conclusion": "WS model win rate 0.523 (fair-coin +4.5%) is the WORST round \u2014 consistent with the WS being the most efficient/hardest round. n=44 (small).",
-    "action_taken": "verdict recorded as CONTRADICTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q11 \u2014 Do elimination games (must-win) show a measurable performance/edge effect?",
-    "status": "INCONCLUSIVE",
-    "hypothesis": "Do elimination games (must-win) show a measurable performance/edge effect?",
-    "sample_size": 83,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "series_state_win_pct": 0.5421686746987951,
-      "baseline": 0.5389830508474577
-    },
-    "conclusion": "Elimination/clinching games: model win rate 0.542 vs baseline 0.539 on comparable PO games. Signal positive; n=83 is small \u2014 forward-test in 2026.",
-    "action_taken": "verdict recorded as INCONCLUSIVE (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q12 \u2014 Do clinching games (series on the line to win) show a measurable effect?",
-    "status": "INCONCLUSIVE",
-    "hypothesis": "Do clinching games (series on the line to win) show a measurable effect?",
-    "sample_size": 83,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "note": "clinching and elimination bundled in Q11 sample"
-    },
-    "conclusion": "Clinching subset not separated from elimination in the current strategy; flagged for a dedicated follow-up strategy.",
-    "action_taken": "verdict recorded as INCONCLUSIVE (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q13 \u2014 Are Wild Card series more predictable (higher model win rate) than later rounds?",
-    "status": "INCONCLUSIVE",
-    "hypothesis": "Are Wild Card series more predictable (higher model win rate) than later rounds?",
-    "sample_size": 48,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "n": 48,
-      "win_pct": 0.5833333333333334,
-      "fair_coin_roi": 0.16666666666666674
-    },
-    "conclusion": "WC model win rate 0.583 (fair-coin +16.7%) \u2014 the most predictable round in the sample. n=48.",
-    "action_taken": "verdict recorded as INCONCLUSIVE (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q14 \u2014 Is there a longshot bias in REG: are strong favorites (<= -150) underpriced?",
-    "status": "CONTRADICTED",
-    "hypothesis": "Is there a longshot bias in REG: are strong favorites (<= -150) underpriced?",
-    "sample_size": 4178,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "n": 4178,
-      "roi": -0.02456504521611977,
-      "pnl": -9954.347252268326,
-      "win_pct": 0.6395404499760651
-    },
-    "conclusion": "Strong favorites (<= -150, 2019-25 real prices): win rate 0.640, ROI -2.46% on 4178 bets. No exploitable longshot-bias edge at these prices.",
-    "action_taken": "verdict recorded as CONTRADICTED (env=REG)",
-    "env": "REG"
-  },
-  {
-    "title": "Q15 \u2014 Are REG moneyline markets efficient against naive models (2019-2025)?",
-    "status": "SUPPORTED",
-    "hypothesis": "Are REG moneyline markets efficient against naive models (2019-2025)?",
-    "sample_size": 54054,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "MLB_REG_ELO_001": -0.0038160546698664415,
-      "MLB_REG_FORM_001": -0.0029396558989793074,
-      "MLB_REG_SEASON_001": -0.002621194872142105,
-      "MLB_REG_LATEFORM_001": -0.006446696758880862,
-      "MLB_REG_FAV_BIAS_001": -0.02456504521611977
-    },
-    "conclusion": "All REG moneyline strategies lose (small) at real 2019-25 prices: LO_001 -0.38%, RM_001 -0.29%, ON_001 -0.26%, RM_001 -0.64%, AS_001 -2.46% -> naive models do not beat the verified market.",
-    "action_taken": "verdict recorded as SUPPORTED (env=REG)",
-    "env": "REG"
-  },
-  {
-    "title": "Q16 \u2014 Can a Poisson run-rate model beat a flat 8.5 total line?",
-    "status": "SUPPORTED",
-    "hypothesis": "Can a Poisson run-rate model beat a flat 8.5 total line?",
-    "sample_size": 25408,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "n": 25408,
-      "roi": 0.014945940894179,
-      "pnl": 5445123932.819508,
-      "win_pct": 0.5310138539042821
-    },
-    "conclusion": "Poisson run-rate vs flat 8.5 line: ROI +1.49% on 25408 bets. CAVEAT: no verified total lines exist in the data; settled against a synthetic 8.5 @ +95 \u2014 treat as model skill vs a flat line, NOT market efficiency.",
-    "action_taken": "verdict recorded as SUPPORTED (env=REG)",
-    "env": "REG"
-  },
-  {
-    "title": "Q17 \u2014 Which REG form window is most predictive: 30-game, September-15, or full-season?",
-    "status": "SUPPORTED",
-    "hypothesis": "Which REG form window is most predictive: 30-game, September-15, or full-season?",
-    "sample_size": 12553,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "form30": 0.5599940819647877,
-      "sep15": 0.5440244701769719,
-      "season": 0.5672747550386362,
-      "best": "season"
-    },
-    "conclusion": "REG settled win rates: 30-game form 0.560, September-15 0.544, full-season 0.567. Full-season strength is the best REG window in this sample (September form is WORST, contradicting the prior hypothesis).",
-    "action_taken": "verdict recorded as SUPPORTED (env=REG)",
-    "env": "REG"
-  },
-  {
-    "title": "Q18 \u2014 Does partial pooling (REG prior + PO likelihood, shrinkage) improve PO probability calibration?",
-    "status": "CONTRADICTED",
-    "hypothesis": "Does partial pooling (REG prior + PO likelihood, shrinkage) improve PO probability calibration?",
-    "sample_size": 352,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
-    "findings": {
-      "brier_A": 0.2482,
-      "brier_E": 0.2614
-    },
-    "conclusion": "Probability calibration (Brier) on PO: A=0.2482, E=0.2614. Hierarchical shrinkage did NOT improve calibration here; its edge is win-rate, not probability quality.",
-    "action_taken": "verdict recorded as CONTRADICTED (env=POST)",
-    "env": "POST"
-  },
-  {
-    "title": "Q19 \u2014 Are 2020 bubble postseason games a distinct environment (scoring/volatility)?",
+    "id": "Q01",
+    "title": "Q01",
     "status": "DATA_UNAVAILABLE",
-    "hypothesis": "Are 2020 bubble postseason games a distinct environment (scoring/volatility)?",
     "sample_size": 0,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
     "findings": {},
-    "conclusion": "2020 PO games are P2 (reconstructed winners, no scores) \u2014 scoring/volatility comparison impossible. Flagged, not guessed.",
-    "action_taken": "verdict recorded as DATA_UNAVAILABLE (env=POST)",
-    "env": "POST"
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
   },
   {
-    "title": "Q20 \u2014 Do rest days / travel in PO series predict game outcomes?",
-    "status": "INCONCLUSIVE",
-    "hypothesis": "Do rest days / travel in PO series predict game outcomes?",
+    "id": "Q02",
+    "title": "Q02",
+    "status": "DATA_UNAVAILABLE",
     "sample_size": 0,
-    "methodology": "point-in-time features, chronological walk-forward; postseason kept separate from regular season",
     "findings": {},
-    "conclusion": "Rest/travel features exist in series_state (point-in-time, verified) but no strategy in v1 uses them; queued as a v2 strategy (MLB_POST_REST_001). Recorded as not-yet-tested rather than assumed.",
-    "action_taken": "verdict recorded as INCONCLUSIVE (env=POST)",
-    "env": "POST"
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
   },
   {
-    "title": "EXP_A \u2014 Model A: REG model on PO (unchanged)",
-    "status": "RUN",
-    "hypothesis": "Model A: REG model on PO (unchanged)",
-    "sample_size": 295,
-    "methodology": "permanent model-comparison framework (Models A-E)",
-    "findings": {
-      "strategy": "MLB_POST_XREG_001",
-      "win_pct": 0.5389830508474577,
-      "note": "fair-coin proxy ROI (no verified PO prices)"
-    },
-    "conclusion": "n=295, brier=0.2482, fair-coin ROI=7.8%",
-    "action_taken": "env=POST round=-",
-    "env": "POST"
+    "id": "Q03",
+    "title": "Q03",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
   },
   {
-    "title": "EXP_B \u2014 Model B: REG + late-season adjustment",
-    "status": "RUN",
-    "hypothesis": "Model B: REG + late-season adjustment",
-    "sample_size": 404,
-    "methodology": "permanent model-comparison framework (Models A-E)",
-    "findings": {
-      "strategy": "MLB_POST_LATESEASON_001",
-      "win_pct": 0.5321782178217822
-    },
-    "conclusion": "n=404, brier=0.3248, fair-coin ROI=6.44%",
-    "action_taken": "env=POST round=-",
-    "env": "POST"
+    "id": "Q04",
+    "title": "Q04",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
   },
   {
-    "title": "EXP_C \u2014 Model C: dedicated PO model (series state)",
-    "status": "RUN",
-    "hypothesis": "Model C: dedicated PO model (series state)",
-    "sample_size": 83,
-    "methodology": "permanent model-comparison framework (Models A-E)",
-    "findings": {
-      "strategy": "MLB_POST_SERIESSTATE_001",
-      "win_pct": 0.5421686746987951,
-      "note": "covers elimination/clinching games only"
-    },
-    "conclusion": "n=83, brier=0.2482, fair-coin ROI=8.43%",
-    "action_taken": "env=POST round=-",
-    "env": "POST"
+    "id": "Q05",
+    "title": "Q05",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
   },
   {
-    "title": "EXP_D \u2014 Model D: round-specific models",
-    "status": "RUN",
-    "hypothesis": "Model D: round-specific models",
-    "sample_size": 305,
-    "methodology": "permanent model-comparison framework (Models A-E)",
-    "findings": {
-      "per_round": {
-        "WC": {
-          "n": 48,
-          "win_pct": 0.5833333333333334,
-          "fair_coin_roi": 0.16666666666666674
-        },
-        "DS": {
-          "n": 130,
-          "win_pct": 0.5461538461538461,
-          "fair_coin_roi": 0.0923076923076922
-        },
-        "LCS": {
-          "n": 83,
-          "win_pct": 0.4939759036144578,
-          "fair_coin_roi": -0.012048192771084376
-        },
-        "WS": {
-          "n": 44,
-          "win_pct": 0.5227272727272727,
-          "fair_coin_roi": 0.045454545454545414
-        }
-      }
-    },
-    "conclusion": "n=305, brier=0.2477, fair-coin ROI=6.89%",
-    "action_taken": "env=POST round=-",
-    "env": "POST"
+    "id": "Q06",
+    "title": "Q06",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
   },
   {
-    "title": "EXP_E \u2014 Model E: hierarchical (REG prior + PO likelihood)",
-    "status": "RUN",
-    "hypothesis": "Model E: hierarchical (REG prior + PO likelihood)",
-    "sample_size": 352,
-    "methodology": "permanent model-comparison framework (Models A-E)",
+    "id": "Q07",
+    "title": "Q07",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q08",
+    "title": "Q08",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q09",
+    "title": "Q09",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q10",
+    "title": "Q10",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q11",
+    "title": "Q11",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q12",
+    "title": "Q12",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q13",
+    "title": "Q13",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q14",
+    "title": "Q14",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q15",
+    "title": "Q15",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q16",
+    "title": "Q16",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q17",
+    "title": "Q17",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q18",
+    "title": "Q18",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "POST",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q19",
+    "title": "Q19",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "ALL",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "Q20",
+    "title": "Q20",
+    "status": "DATA_UNAVAILABLE",
+    "sample_size": 0,
+    "findings": {},
+    "conclusion": "Not run: source data required by this question is unavailable.",
+    "env": "ALL",
+    "round_code": null,
+    "provenance": "No source-backed feature snapshot is available in this checkout."
+  },
+  {
+    "id": "EXP_A",
+    "title": "Model A \u2014 regular-season transfer",
+    "status": "NOT_RUN",
+    "sample_size": 0,
     "findings": {
-      "strategy": "MLB_POST_HIERARCHICAL_001",
-      "win_pct": 0.5653409090909091
+      "n": 0,
+      "status": "NOT_RUN",
+      "strategy_id": "MLB_POST_XREG_001"
     },
-    "conclusion": "n=352, brier=0.2614, fair-coin ROI=13.07%",
-    "action_taken": "env=POST round=-",
-    "env": "POST"
+    "brier": null,
+    "log_loss": null,
+    "roi": null,
+    "env": "POST",
+    "round_code": null,
+    "conclusion": "Comparison is not a superiority claim; preserve all models.",
+    "provenance": "experiments table"
+  },
+  {
+    "id": "EXP_B",
+    "title": "Model B \u2014 regular season plus postseason adjustment",
+    "status": "NOT_RUN",
+    "sample_size": 0,
+    "findings": {
+      "n": 0,
+      "status": "NOT_RUN",
+      "strategy_id": "MLB_POST_ADJUSTED_001"
+    },
+    "brier": null,
+    "log_loss": null,
+    "roi": null,
+    "env": "POST",
+    "round_code": null,
+    "conclusion": "Comparison is not a superiority claim; preserve all models.",
+    "provenance": "experiments table"
+  },
+  {
+    "id": "EXP_C",
+    "title": "Model C \u2014 dedicated postseason/series state",
+    "status": "NOT_RUN",
+    "sample_size": 0,
+    "findings": {
+      "n": 0,
+      "status": "NOT_RUN",
+      "strategy_id": "MLB_POST_SERIESSTATE_001"
+    },
+    "brier": null,
+    "log_loss": null,
+    "roi": null,
+    "env": "POST",
+    "round_code": null,
+    "conclusion": "Comparison is not a superiority claim; preserve all models.",
+    "provenance": "experiments table"
+  },
+  {
+    "id": "EXP_D",
+    "title": "Model D \u2014 round-specific models",
+    "status": "NOT_RUN",
+    "sample_size": 0,
+    "findings": {
+      "n": 0,
+      "status": "NOT_RUN",
+      "strategy_ids": [
+        "MLB_POST_WC_ELO_001",
+        "MLB_POST_DS_ELO_001",
+        "MLB_POST_LCS_ELO_001",
+        "MLB_POST_WS_ELO_001"
+      ]
+    },
+    "brier": null,
+    "log_loss": null,
+    "roi": null,
+    "env": "POST",
+    "round_code": null,
+    "conclusion": "Comparison is not a superiority claim; preserve all models.",
+    "provenance": "experiments table"
+  },
+  {
+    "id": "EXP_E",
+    "title": "Model E \u2014 hierarchical partial pooling",
+    "status": "NOT_RUN",
+    "sample_size": 0,
+    "findings": {
+      "n": 0,
+      "status": "NOT_RUN",
+      "strategy_id": "MLB_POST_HIERARCHICAL_001"
+    },
+    "brier": null,
+    "log_loss": null,
+    "roi": null,
+    "env": "POST",
+    "round_code": null,
+    "conclusion": "Comparison is not a superiority claim; preserve all models.",
+    "provenance": "experiments table"
   }
 ]

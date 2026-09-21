@@ -1,590 +1,478 @@
-"""Walk-forward backtest + paper-trading engine (spec §17, §19, §21).
+"""Chronological backtest and model-evaluation runner.
 
-DATA GATE (verified corpus):
-  * REG games: mirror schedule 2015-2026 (2019-2025 cross-verified against
-    an independent odds source; 2026 single-source, in progress).
-  * POSTSEASON games: po_corpus.parquet, which is the mirror's own postseason
-    2015-2026 with real scores.  It is gated by an independent cross-check in
-    features/po_corpus.py: the corpus must reproduce all eleven documented
-    World Series champions 2015-2025 or the build raises.
-    (The 2019-2024 rows were previously replaced by hand-written
-    "reconstructed winners"; that reconstruction contained invented series
-    results and has been retired — see the po_corpus docstring.)
-
-MARKET GATE (verified prices only, spec §13):
-  * Real moneylines exist ONLY for REG 2019-2025 (cesar-dx source, 15,442
-    games, 100% join + outcome match).  NO verified market prices exist for
-    any 2019-2025 postseason game (searched; documented in source_registry).
-  * Consequences:
-      - REG 2019-2025 ML bets settle at REAL prices -> real paper ROI.
-      - Games without verified prices (REG 2015-18, ALL PO 2019-25, REG
-        2026) are scored as EVAL picks: no real bankroll impact, but
-        win-rate / Brier / log-loss / fair-coin proxy ROI are tracked.
-      - The fair-coin proxy bankroll stakes 2% flat at +100 on every pick:
-        a clearly-labeled market-free skill proxy (2 x (win_pct - 0.5) ROI),
-        NOT a claim about real market efficiency.
-      - TOTALS settle against a synthetic 8.5 line at +95 (no verified
-        total odds exist anywhere in the data) - labeled synthetic.
-  * Uncompleted 2026 games: PROPOSED (no price) or OPEN (real price).
-
-Chronicity & anti-leakage:
-  * games processed strictly in start-time order;
-  * team state (Elo, form, season stats) updates only after a game completes;
-  * round intercepts learned only from PRIOR-season PO games;
-  * series state uses only earlier games of the same series;
-  * uncompleted games never settle.
-
-Bankroll: each strategy has its own bankroll per competition environment
-(REG / WC / DS / LCS / WS / POST).  All-MLB is a computed view (spec §4).
+A backtest may settle PnL only when a timestamped, verified historical quote
+exists at the simulated decision time.  A game with a result but no quote is
+an ``EVAL`` prediction; it never receives a placeholder price, stake, ROI or
+PnL.  An unfinished game is ``PROPOSED`` or ``OPEN`` and cannot be settled.
 """
 from __future__ import annotations
 
 import math
+import uuid
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from .. import db
-from ..config import (KELLY_FRACTION, MAX_STAKE_PCT, STARTING_BANKROLL)
+from ..config import FEAT, MAX_STAKE_PCT, STARTING_BANKROLL, am_to_prob
+from ..engine.catalog import register_catalog
+from ..engine.evaluation import american_pnl
 from ..features.engine import compute_features, load_events, load_games
+from .ledger import kelly_stake
 from .strategies import MODELS, Strategy, build_catalog, special_rules
 
-FAIRCOIN_STAKE = 0.02   # flat stake fraction for the fair-coin proxy
-FAIRCOIN_DECIMAL = 2.0  # +100 proxy price
+ROUNDS = ("WC", "DS", "LCS", "WS")
 
 
-def _need(yr: int, rnd: str) -> int:
-    """Wins required to take the series (drives clinch/elimination flags).
-
-    Two bugs fixed 2026-09-21 (both changed series-state features, so every
-    postseason clinch/elimination flag before this was partly wrong):
-      * 2015 (and 2012) had a SINGLE-GAME wild card -> 1 win, not 2.
-      * the 2020 Division Series was best-of-FIVE (3 wins).  The 2020
-        expansion lengthened the wild-card round to best-of-three; the DS
-        kept its normal length (MLB, 2020-07-23).
-    Kept in sync with ingest.baseballr.round_needed.
-    """
-    if rnd == "WC":
-        return 1 if yr in (2012, 2015) else 2
-    if rnd == "DS":
+def _need(year: int, round_code: str) -> int:
+    """Wins required by the historical format, used by series-state tests."""
+    if round_code == "WC":
+        return 1 if int(year) in (2012, 2015) else 2
+    if round_code == "DS":
         return 3
-    return 4
+    if round_code in {"LCS", "WS"}:
+        return 4
+    raise ValueError(f"unknown postseason round {round_code!r}")
 
 
-def _american_to_decimal(o: float) -> float:
-    if o < 0:
-        return 100.0 / (-o) + 1.0
-    return o / 100.0 + 1.0
+def _american_to_decimal(odds: float) -> float:
+    from ..config import american_to_decimal
+    return american_to_decimal(odds)
 
 
-# ------------------------------------------------------------------ corpus
+def _has_score(row) -> bool:
+    return bool(getattr(row, "completed", False)) and pd.notna(getattr(row, "home_score", np.nan)) and pd.notna(getattr(row, "away_score", np.nan))
+
+
 def build_backtest_games() -> pd.DataFrame:
-    """REG (mirror) + verified PO corpus in one chronological frame."""
-    from ..config import FEAT
-    g = load_games()
-    reg = g[g.round_code.isna()].copy()
-    reg["score_available"] = True
-
-    po = pd.read_parquet(FEAT / "po_corpus.parquet")
-    for c in reg.columns:
-        if c not in po.columns:
-            po[c] = np.nan
-    po["game_type"] = "PO"
-    po["status"] = np.where(po.completed.astype(bool), "F", "PRE")
-    # home_win is only defined for settled games; unsettled rows stay NA so
-    # they can never be settled by accident.
-    settled = po.winner_team_id.notna()
-    po["home_win"] = pd.Series(
-        np.where(settled, (po.winner_team_id == po.home_team_id).astype(float),
-                 np.nan), index=po.index).astype("Int64")
-
-    # The corpus is the mirror's own postseason (see features/po_corpus.py),
-    # so game_pk, series_key, dates and scores are all real.  No synthetic
-    # scores and no synthetic series keys are injected here any more.
-    out = pd.concat([reg, po], ignore_index=True)
-    out["start_ts"] = pd.to_datetime(out.start_utc, utc=True, errors="coerce")
-    out["date"] = pd.to_datetime(out.game_date, errors="coerce")
-    bad = out.start_ts.isna()
-    if bad.any():
-        out.loc[bad, "start_ts"] = (pd.to_datetime(out.loc[bad, "game_date"],
-                                                   utc=True)
-                                    + pd.Timedelta(hours=12))
-    out = out.sort_values(["start_ts", "game_pk"]).reset_index(drop=True)
-    return out[reg.columns]
+    """Load only source-backed games; fail rather than reconstructing missing rows."""
+    games_path = FEAT / "games.parquet"
+    if not games_path.exists():
+        raise FileNotFoundError(
+            f"{games_path} is missing. Fetch and validate a source before running a backtest; "
+            "no games are generated by MLBComp."
+        )
+    games = load_games().copy()
+    games["score_available"] = games.apply(_has_score, axis=1)
+    # Older builds stored postseason separately.  It is accepted only as a
+    # source-backed corpus with a real game_pk, not as a hand-written result.
+    if games.round_code.isna().all() and (FEAT / "po_corpus.parquet").exists():
+        po = pd.read_parquet(FEAT / "po_corpus.parquet")
+        po["game_type"] = "PO"
+        po["status"] = np.where(po["score_available"], "F", "PRE")
+        po["completed"] = po["score_available"].astype(bool)
+        for column in games.columns:
+            if column not in po.columns:
+                po[column] = np.nan
+        games = pd.concat([games, po[games.columns]], ignore_index=True)
+    if "start_ts" not in games:
+        games["start_ts"] = pd.to_datetime(games["start_utc"], utc=True, errors="coerce")
+    games["start_ts"] = pd.to_datetime(games["start_ts"], utc=True, errors="coerce")
+    missing_time = games["start_ts"].isna()
+    # Calendar date is sufficient for deterministic ordering, but it is not
+    # presented as an availability timestamp anywhere in the ledger.
+    games.loc[missing_time, "start_ts"] = pd.to_datetime(games.loc[missing_time, "game_date"], utc=True, errors="coerce")
+    return games.sort_values(["start_ts", "game_pk"], kind="mergesort").reset_index(drop=True)
 
 
-# ------------------------------------------------------------------ main
-def run_backtest(po_valid_pks: set[int] | None = None,
-                 min_season: int = 2015) -> dict:
-    """Run the full competition backtest (verified-corpus gate)."""
+def _round_state(g, ctx: dict[str, Any], f: dict[str, Any], is_post: bool) -> dict[str, Any] | None:
+    if not is_post or not isinstance(getattr(g, "series_key", None), str):
+        f.setdefault("n_series_games_before", 0)
+        return None
+    key = g.series_key
+    if key not in ctx["series"]:
+        ctx["series"][key] = {"n": 0, "a": int(g.home_team_id), "b": int(g.away_team_id),
+                               "wa": 0, "wb": 0, "year": int(g.season), "round": g.round_code}
+    state = ctx["series"][key]
+    f["n_series_games_before"] = state["n"]
+    f["wins_a_before"] = state["wa"]
+    f["wins_b_before"] = state["wb"]
+    needed = _need(state["year"], state["round"])
+    f["clinch_a"] = int(state["wa"] == needed - 1)
+    f["clinch_b"] = int(state["wb"] == needed - 1)
+    f["elimination_a"] = int(state["wb"] == needed - 1)
+    f["elimination_b"] = int(state["wa"] == needed - 1)
+    ctx["series_team_a"] = state["a"]
+    return state
+
+
+def _update_series(g, state: dict[str, Any] | None) -> None:
+    if state is None or not _has_score(g):
+        return
+    home_win = int(g.home_score > g.away_score)
+    if int(g.home_team_id) == state["a"]:
+        state["wa"] += home_win
+        state["wb"] += 1 - home_win
+    else:
+        state["wb"] += 1 - home_win
+        state["wa"] += home_win
+    state["n"] += 1
+
+
+def _outcome(g, decision: dict[str, Any], market: str) -> str | None:
+    if not _has_score(g):
+        return None
+    if market in {"ML", "F5_ML"}:
+        home_win = int(g.home_score > g.away_score)
+        selected_home = decision["selection"] == "HOME"
+        return "W" if ((home_win == 1) == selected_home) else "L"
+    if market in {"TOTAL", "F5_TOTAL", "TEAM_TOTAL"}:
+        # A model hypothesis line is not a historical market line.  Only a
+        # source-backed observed line may generate a scored market outcome.
+        if decision.get("observed_line") is None:
+            return None
+        line = float(decision["observed_line"])
+        total = int(g.home_score) + int(g.away_score)
+        if total == line:
+            return "P"
+        over = total > line
+        return "W" if ((decision["selection"].startswith("OVER")) == over) else "L"
+    return None
+
+
+def _market_quote(f: dict[str, Any], decision: dict[str, Any], g,
+                  verified_source_ids: set[str] | None = None,
+                  verified_observation_ids: set[str] | None = None) -> dict[str, Any] | None:
+    """Return a quote only with timestamp, explicit verification and source evidence."""
+    side = "home" if decision["selection"] == "HOME" else "away"
+    odds = f.get(f"{side}_odds") if decision["market"] in {"ML", "F5_ML"} else f.get("market_odds")
+    verified = f.get("market_quote_verified", False)
+    observed_at = f.get("market_quote_observed_at")
+    available_at = f.get("market_quote_available_at")
+    source_id = f.get("market_quote_source_id")
+    source_observation_id = f.get("market_quote_source_observation_id")
+    if verified_observation_ids is not None and source_observation_id:
+        if source_observation_id not in verified_observation_ids:
+            return None
+    elif verified_source_ids is not None and source_id not in verified_source_ids:
+        return None
+    if not verified or not source_id or not pd.notna(odds) or not observed_at or not available_at:
+        return None
+    try:
+        observed = pd.to_datetime(observed_at, utc=True)
+        available = pd.to_datetime(available_at, utc=True)
+        start = pd.to_datetime(getattr(g, "start_ts"), utc=True)
+        if (pd.isna(observed) or pd.isna(available) or pd.isna(start)
+                or observed > start or available > start):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return {"american": float(odds), "observed_at": str(observed_at),
+            "available_at": f.get("market_quote_available_at"),
+            "closing": bool(f.get("market_quote_closing", False)),
+            "source_id": f.get("market_quote_source_id"),
+            "source_url": f.get("market_quote_source_url"),
+            "source_observation_id": f.get("market_quote_source_observation_id")}
+
+
+def _prediction_id(run_id: str, strategy: Strategy, game_pk: int) -> str:
+    return f"{run_id}:{strategy.sid}:{game_pk}"
+
+
+def run_backtest(po_valid_pks: set[int] | None = None, min_season: int = 2015,
+                 run_id: str | None = None) -> dict[str, Any]:
+    """Run a chronological competition and append a new immutable run."""
     db.init_db()
-    from ..config import FEAT
+    run_id = run_id or f"backtest:{uuid.uuid4().hex[:12]}"
     games = build_backtest_games()
+    events_path = FEAT / "game_events.parquet"
+    odds_path = FEAT / "odds.parquet"
+    if not events_path.exists():
+        raise FileNotFoundError(f"{events_path} missing; cannot derive point-in-time features")
     events = load_events()
-    odds = pd.read_parquet(FEAT / "odds.parquet")
+    odds = pd.read_parquet(odds_path) if odds_path.exists() else pd.DataFrame()
+    state_df = db.query_df("SELECT * FROM series_state")
+    features = compute_features(games, events, state_df, odds)
+    verified_observations = db.query_df(
+        "SELECT observation_id,source_id FROM source_observations WHERE verification_status='VERIFIED'"
+    )
+    observation_ids = verified_observations.observation_id.tolist()
+    verified_source_ids = set(verified_observations.source_id.tolist())
+    verified_observation_ids = set(verified_observations.observation_id.tolist())
+    source_observations = db.jdump(observation_ids)
+    strategies = register_catalog(build_catalog())
+    # Only implemented/data-ready strategies enter the run.  Unsupported
+    # hypotheses remain in the catalog and are explicitly visible as such.
+    runnable = [s for s in strategies if s.status not in {"DATA_UNAVAILABLE", "REJECTED"}
+                and s.model in MODELS]
+    db_time = db.utcnow()
+    with db.db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO backtest_runs (run_id,run_type,started_at,data_cutoff,config_json,status,notes) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (run_id, "BACKTEST", db_time, str(games.start_ts.max()),
+             db.jdump({"min_season": min_season, "strategy_count": len(runnable),
+                       "price_gate": "verified quote with availability <= decision time"}),
+             "RUNNING", "No synthetic prices or fills"),
+        )
 
-    conn0 = db.connect()
-    series_state = pd.read_sql("SELECT * FROM series_state", conn0)
-    conn0.close()
+    ctx: dict[str, Any] = {"series": {}, "series_team_a": None,
+                           "round_intercepts": {r: 0.0 for r in ROUNDS},
+                           "round_diffs": {r: [] for r in ROUNDS}, "fav_max": -150.0}
+    bankrolls = {(s.sid, s.env): STARTING_BANKROLL for s in runnable}
+    balances = {(s.sid, s.env): [(None, STARTING_BANKROLL)] for s in runnable}
+    metrics: dict[tuple[str, str], list[tuple[float, int]]] = {(s.sid, s.env): [] for s in runnable}
+    bets: list[dict[str, Any]] = []
+    predictions: list[dict[str, Any]] = []
+    counts = {"settled": 0, "eval": 0, "proposed": 0, "open": 0, "skipped": 0}
+    last_post_season = None
 
-    feats = compute_features(games, events, series_state, odds)
-    strategies = build_catalog()
-    ctx = {
-        "round_diffs": {rnd: [] for rnd in ("WC", "DS", "LCS", "WS")},
-        "round_intercepts": {rnd: 0.0 for rnd in ("WC", "DS", "LCS", "WS")},
-        "series": {},
-        "series_team_a": None,
-        "fav_max": -150.0,
-    }
-
-    bankrolls: dict[tuple, float] = {}      # real-price bankroll
-    fcbankrolls: dict[tuple, float] = {}    # fair-coin proxy bankroll
-    balances: dict[tuple, list] = {}
-    fcbalances: dict[tuple, list] = {}
-    brier: dict[tuple, list] = {}
-    logloss: dict[tuple, list] = {}
-
-    def key(s: Strategy):
-        return (s.sid, s.env)
-
-    for s in strategies:
-        bankrolls[key(s)] = STARTING_BANKROLL
-        fcbankrolls[key(s)] = STARTING_BANKROLL
-        balances[key(s)] = [(None, STARTING_BANKROLL)]
-        fcbalances[key(s)] = [(None, STARTING_BANKROLL)]
-        brier[key(s)] = []
-        logloss[key(s)] = []
-
-    bets = []
-    n_settled = n_eval = n_proposed = n_open = 0
-    totals_skipped_no_score = 0
-    last_po_season = None
-
-    for g in games.itertuples():
-        if g.season < min_season:
+    for g in games.itertuples(index=False):
+        if int(g.season) < min_season:
             continue
-        is_po = bool(pd.notna(g.round_code))
-
-        # PO season transition: promote last PO season's diffs to intercepts
-        if is_po and g.season != last_po_season:
-            if last_po_season is not None:
-                for rnd, diffs in ctx["round_diffs"].items():
-                    if len(diffs) >= 15:
-                        ctx["round_intercepts"][rnd] = float(
-                            np.clip(np.mean(diffs), -0.25, 0.25))
-                    ctx["round_diffs"][rnd] = []
-            last_po_season = g.season
-
-        f = feats.loc[g.game_pk].to_dict()
-        f["game_pk"] = g.game_pk
-
-        # ---- series bookkeeping (ctx-derived, anti-leakage)
-        si = None
-        if is_po and isinstance(g.series_key, str):
-            sk = g.series_key
-            if sk not in ctx["series"]:
-                ctx["series"][sk] = {"n": 0, "a": int(g.home_team_id),
-                                     "b": int(g.away_team_id), "wa": 0,
-                                     "wb": 0, "yr": int(g.season),
-                                     "rnd": g.round_code}
-            si = ctx["series"][sk]
-            f["n_series_games_before"] = si["n"]
-            f["wins_a_before"] = si["wa"]
-            f["wins_b_before"] = si["wb"]
-            ctx["series_team_a"] = si["a"]
-            need = _need(si["yr"], si["rnd"])
-            f["clinch_a"] = 1 if si["wa"] == need - 1 else 0
-            f["clinch_b"] = 1 if si["wb"] == need - 1 else 0
-            f["elimination_a"] = 1 if si["wb"] == need - 1 else 0
-            f["elimination_b"] = 1 if si["wa"] == need - 1 else 0
-        else:
-            f["n_series_games_before"] = 0
-
-        for s in strategies:
-            if not s.applies_to(g):
+        is_post = pd.notna(getattr(g, "round_code", np.nan))
+        if is_post and g.season != last_post_season:
+            if last_post_season is not None:
+                for round_code, residuals in ctx["round_diffs"].items():
+                    # Prior seasons only; if sample is too small the intercept
+                    # remains zero and the experiment is marked uncertain.
+                    if len(residuals) >= 15:
+                        ctx["round_intercepts"][round_code] = float(np.clip(np.mean(residuals), -0.25, 0.25))
+                    ctx["round_diffs"][round_code] = []
+            last_post_season = g.season
+        if int(g.game_pk) not in features.index:
+            continue
+        f = features.loc[g.game_pk].to_dict()
+        state = _round_state(g, ctx, f, bool(is_post))
+        for strategy in runnable:
+            if not strategy.applies_to(g):
                 continue
-            scored = False
-            try:
-                decision = s.decide(g, f, ctx)
-            except Exception:
-                decision = None
-            if decision is not None:
-                decision = special_rules(s.sid, g, f, ctx, decision)
-                if decision is not None and s.market == "TOTAL" \
-                        and is_po and not g.score_available:
-                    totals_skipped_no_score += 1
-                    decision = None
+            decision = strategy.decide(g, f, ctx)
+            decision = special_rules(strategy.sid, g, f, ctx, decision)
             if decision is None:
-                # calibration on model probability even without a bet
-                try:
-                    p = MODELS[s.model](g, f, ctx)
-                except Exception:
-                    p = np.nan
-                if s.market == "ML" and g.completed and isinstance(p, float) \
-                        and not math.isnan(p) and not pd.isna(g.home_win):
-                    y = 1.0 if g.home_win == 1 else 0.0
-                    brier[key(s)].append((p - y) ** 2)
-                    p2 = min(max(p, 1e-6), 1 - 1e-6)
-                    logloss[key(s)].append(-(y * math.log(p2)
-                                             + (1 - y) * math.log(1 - p2)))
-                    scored = True
                 continue
-            if g.completed and s.market == "ML" and not scored \
-                    and not pd.isna(g.home_win):
-                p_home = (decision["p_model"]
-                          if decision["selection"] == "HOME"
-                          else 1 - decision["p_model"])
-                y = 1.0 if g.home_win == 1 else 0.0
-                brier[key(s)].append((p_home - y) ** 2)
-                p2 = min(max(p_home, 1e-6), 1 - 1e-6)
-                logloss[key(s)].append(-(y * math.log(p2)
-                                         + (1 - y) * math.log(1 - p2)))
-
-            if s.market == "ML":
-                sel = decision["selection"]
-                p_home = (decision["p_model"] if sel == "HOME"
-                          else 1 - decision["p_model"])
-                mkt = f.get("home_odds" if sel == "HOME" else "away_odds",
-                            np.nan)
-                has_mkt = pd.notna(mkt)
-
-                if not g.completed:
-                    # live / upcoming: paper bet if priced, else proposal
-                    if has_mkt:
-                        decimal = _american_to_decimal(mkt)
-                        kelly = decision.get("edge", p_home - 0.5) / \
-                            (decimal - 1.0)
-                        stake = bankrolls[key(s)] * min(
-                            KELLY_FRACTION * max(kelly, 0), MAX_STAKE_PCT)
-                        bets.append(_bet_row(g, s, decision, stake, "OPEN",
-                                             None, 0.0, closing=mkt))
-                        n_open += 1
-                    else:
-                        bets.append(_bet_row(g, s, decision, 0.0,
-                                             "PROPOSED", None, 0.0))
-                        n_proposed += 1
-                    continue
-
-                if pd.isna(g.home_win):
-                    # no-decision game (tie) -> push
-                    bets.append(_bet_row(g, s, decision, 0.0, "SETTLED",
-                                         "P", 0.0,
-                                         closing=mkt if has_mkt else None))
-                    n_settled += 1
-                    continue
-
-                won = (g.home_win == 1) if sel == "HOME" else (g.home_win == 0)
-                result = "W" if won else "L"
-
-                # fair-coin proxy bankroll (every pick, +100, 2% flat)
-                fc_stake = fcbankrolls[key(s)] * FAIRCOIN_STAKE
-                fc_pnl = fc_stake if won else -fc_stake
-                fcbankrolls[key(s)] += fc_pnl
-                fcbalances[key(s)].append((str(g.game_date),
-                                           fcbankrolls[key(s)]))
-
-                if has_mkt:
-                    decimal = _american_to_decimal(mkt)
-                    kelly = decision.get("edge", p_home - 0.5) / (decimal - 1.0)
-                    stake = bankrolls[key(s)] * min(
-                        KELLY_FRACTION * max(kelly, 0), MAX_STAKE_PCT)
-                    stake = max(stake, 0.0)
-                    pnl = stake * (decimal - 1.0) if won else -stake
-                    bankrolls[key(s)] += pnl
-                    balances[key(s)].append((str(g.game_date),
-                                             bankrolls[key(s)]))
-                    bets.append(_bet_row(g, s, decision, stake, "SETTLED",
-                                         result, pnl, closing=mkt))
-                    n_settled += 1
+            selected_p = float(decision["p_model"])
+            prediction_id = _prediction_id(run_id, strategy, int(g.game_pk))
+            predictions.append({
+                "prediction_id": prediction_id,
+                "strategy_version_id": f"{strategy.sid}_{strategy.version}",
+                "game_pk": int(g.game_pk), "environment": strategy.env,
+                "round_code": None if pd.isna(getattr(g, "round_code", np.nan)) else g.round_code,
+                "decision_time": str(g.start_ts), "data_cutoff_time": str(g.start_ts),
+                "selection": decision["selection"], "model_probability": selected_p,
+                "fair_price": selected_p, "required_price": decision.get("required_price"),
+                "edge": None, "feature_snapshot_hash": db.stable_hash({"game_pk": int(g.game_pk), "features": f}),
+                "source_observation_ids": source_observations, "availability_status": "SOURCE_BACKED",
+                "result": None, "created_at": db.utcnow(),
+            })
+            result = _outcome(g, decision, strategy.market)
+            predictions[-1]["result"] = result
+            quote = _market_quote(f, decision, g, verified_source_ids, verified_observation_ids)
+            has_result = result in {"W", "L", "P"}
+            if quote is not None:
+                from ..config import am_to_prob, devig_two
+                if strategy.market == "ML":
+                    hp, ap = am_to_prob(f.get("home_odds")), am_to_prob(f.get("away_odds"))
+                    hp, ap = devig_two(hp, ap)
+                    market_p = hp if decision["selection"] == "HOME" else ap
+                    edge = selected_p - market_p if pd.notna(market_p) else None
                 else:
-                    # no verified price -> EVAL pick (no real bankroll)
-                    bets.append(_bet_row(g, s, decision, 0.0, "EVAL", result,
-                                         0.0, faircoin_pnl=fc_pnl))
-                    n_eval += 1
-                continue
-
-            # ---- TOTAL (synthetic 8.5 line at +95; real score required)
-            if not g.completed:
-                # live / upcoming: no score yet (and no real total line
-                # exists in the data) -> proposal only
-                bets.append(_bet_row(g, s, decision, 0.0, "PROPOSED", None,
-                                     0.0, synthetic=True))
-                n_proposed += 1
-                continue
-            line = float(decision.get("line", 8.5))
-            total = int(g.home_score) + int(g.away_score)
-            over = total > line
-            sel_over = decision["selection"] == "OVER"
-            base = bankrolls[key(s)] * FAIRCOIN_STAKE
-            if total == line:
-                result, pnl = "P", 0.0
+                    market_p = None
+                    edge = None
+                decision["edge"] = edge
+                if edge is not None and edge < strategy.min_edge:
+                    counts["skipped"] += 1
+                    continue
+                stake = kelly_stake(bankrolls[(strategy.sid, strategy.env)], selected_p, quote["american"])
+                if stake <= 0:
+                    counts["skipped"] += 1
+                    continue
+                status = "SETTLED" if has_result else "OPEN"
+                pnl = american_pnl(stake, quote["american"], result) if status == "SETTLED" and result else None
+                if pnl is not None:
+                    bankrolls[(strategy.sid, strategy.env)] += pnl
+                    balances[(strategy.sid, strategy.env)].append((str(g.game_date), bankrolls[(strategy.sid, strategy.env)]))
+                    counts["settled"] += 1
+                else:
+                    counts["open"] += 1
+                bets.append(_bet_row(g, strategy, decision, stake, status, result, pnl,
+                                     market_price=quote["american"], quote=quote, run_id=run_id))
+            elif has_result:
+                # A result can score model skill, but there is no bet or PnL.
+                counts["eval"] += 1
+                bets.append(_bet_row(g, strategy, decision, 0.0, "EVAL", result, None,
+                                     run_id=run_id))
             else:
-                won = over == sel_over
-                result = "W" if won else "L"
-                pnl = 0.95 * base if won else -base
-            bankrolls[key(s)] += pnl
-            balances[key(s)].append((str(g.game_date), bankrolls[key(s)]))
-            bets.append(_bet_row(g, s, decision, base, "SETTLED", result,
-                                 pnl, synthetic=True))
-            n_settled += 1
+                counts["proposed"] += 1
+                bets.append(_bet_row(g, strategy, decision, 0.0, "PROPOSED", None, None,
+                                     run_id=run_id))
+            if has_result and strategy.market in {"ML", "F5_ML"}:
+                y = 1 if result == ("W" if decision["selection"] == "HOME" else "L") else 0
+                metrics[(strategy.sid, strategy.env)].append((selected_p, y))
+        # Every model saw this game before the state update.  Update the series
+        # state after all decisions, and only with a verified result.
+        _update_series(g, state)
+        if is_post and _has_score(g) and g.round_code in ROUNDS:
+            p_elo = f.get("p_elo")
+            if isinstance(p_elo, (float, int)) and math.isfinite(float(p_elo)):
+                ctx["round_diffs"][g.round_code].append(int(g.home_score > g.away_score) - float(p_elo))
 
-        # ---- post-completion updates (anti-leakage: after all strategies)
-        if is_po and g.completed:
-            if si is not None:
-                si["n"] += 1
-                hw = int(g.home_win)
-                if int(g.home_team_id) == si["a"]:
-                    si["wa"] += hw
-                    si["wb"] += 1 - hw
-                else:
-                    si["wb"] += 1 - hw
-                    si["wa"] += hw
-            pe = feats.loc[g.game_pk, "p_elo"]
-            if isinstance(pe, float) and not math.isnan(pe):
-                ctx["round_diffs"][g.round_code].append(
-                    (1 if g.home_win == 1 else 0) - pe)
-
-    _write_to_db(strategies, bets, balances, brier, logloss, bankrolls,
-                 fcbankrolls, fcbalances, n_settled, n_eval, n_proposed,
-                 n_open, totals_skipped_no_score)
-    return {"settled_bets": n_settled, "eval_picks": n_eval,
-            "open_bets": n_open, "proposed_bets": n_proposed,
-            "totals_skipped_no_score": totals_skipped_no_score,
-            "round_intercepts": {k: round(v, 4)
-                                 for k, v in ctx["round_intercepts"].items()}}
+    _append_run_outputs(run_id, strategies, runnable, bets, predictions, balances, metrics, counts, bankrolls)
+    with db.db() as conn:
+        conn.execute("UPDATE backtest_runs SET finished_at=?,status=? WHERE run_id=?",
+                     (db.utcnow(), "COMPLETED", run_id))
+    db.audit("backtest:completed", db.jdump({"run_id": run_id, **counts}),
+             entity_type="backtest_run", entity_id=run_id)
+    return {"run_id": run_id, **{f"{k}_bets": v for k, v in counts.items()},
+            "round_intercepts": {k: round(v, 6) for k, v in ctx["round_intercepts"].items()},
+            "strategies": len(runnable)}
 
 
-def _bet_row(g, s: Strategy, decision, stake, status, result, pnl,
-             closing=None, faircoin_pnl=None, synthetic=False):
+def _bet_row(g, strategy: Strategy, decision: dict[str, Any], stake: float,
+             status: str, result: str | None, pnl: float | None,
+             market_price: float | None = None, quote: dict[str, Any] | None = None,
+             run_id: str | None = None) -> dict[str, Any]:
     return {
-        "game_pk": int(g.game_pk), "strategy_id": s.sid, "env": s.env,
-        "season": int(g.season),
-        "round_code": None if pd.isna(g.round_code) else g.round_code,
-        "market": s.market,
-        "selection": (decision["selection"] + f" {decision.get('line', '')}"
-                      if s.market == "TOTAL" else decision["selection"]),
-        "model_prob": decision["p_model"],
-        "fair_price": decision["fair_price"],
-        "market_price": decision.get("p_market"),
-        "edge": decision.get("edge", abs(decision["p_model"] - 0.5)),
-        "stake": stake, "made_at": db.utcnow(), "status": status,
-        "result": result, "pnl": pnl, "closing_price": closing, "clv": None,
-        "series_state": g.series_key if isinstance(g.series_key, str) else None,
-        "faircoin_pnl": faircoin_pnl, "synthetic": 1 if synthetic else 0,
+        "run_id": run_id, "prediction_id": _prediction_id(run_id or "run", strategy, int(g.game_pk)),
+        "game_pk": int(g.game_pk), "strategy_id": strategy.sid, "env": strategy.env,
+        "season": int(g.season), "round_code": None if pd.isna(getattr(g, "round_code", np.nan)) else g.round_code,
+        "market": strategy.market, "selection": decision["selection"],
+        "model_prob": decision["p_model"], "fair_price": decision["fair_price"],
+        "required_price": decision.get("required_price"),
+        "market_price": market_price, "edge": decision.get("edge"), "stake": stake,
+        "made_at": db.utcnow(), "status": status, "result": result, "pnl": pnl,
+        "closing_price": (quote["american"] if quote and quote.get("closing") else None),
+        "clv": None, "series_state": getattr(g, "series_key", None),
+        "synthetic_pnl": None, "synthetic": 0,
+        "verification_status": "VERIFIED_PRICE" if quote else "NO_MARKET_PRICE",
+        "quote_source_id": quote.get("source_id") if quote else None,
+        "quote_source_url": quote.get("source_url") if quote else None,
+        "quote_source_observation_id": quote.get("source_observation_id") if quote else None,
+        "quote_observed_at": quote.get("observed_at") if quote else None,
+        "quote_available_at": quote.get("available_at") if quote else None,
+        "quote_price_american": quote.get("american") if quote else None,
     }
 
 
-def _write_to_db(strategies, bets, balances, brier, logloss, bankrolls,
-                 fcbankrolls, fcbalances, n_settled, n_eval, n_proposed,
-                 n_open, totals_skipped_no_score):
-    conn = db.connect()
-    db.audit("backtest:start", f"strategies={len(strategies)}")
-    for s in strategies:
-        conn.execute(
-            "INSERT OR REPLACE INTO strategies VALUES (?,?,?,?,?,?,?,?,?)",
-            (s.sid, s.name, s.env, s.model, s.market, s.hypothesis,
-             "BACKTESTED", db.utcnow(), s.notes))
-    conn.execute("DELETE FROM bets")
-    for b in bets:
-        conn.execute(
-            "INSERT INTO bets (game_pk, strategy_id, env, season, round_code,"
-            " market, selection, model_prob, fair_price, market_price, edge,"
-            " stake, made_at, status, result, pnl, closing_price, clv,"
-            " series_state, faircoin_pnl, synthetic)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (b["game_pk"], b["strategy_id"], b["env"], b["season"],
-             b["round_code"], b["market"], b["selection"], b["model_prob"],
-             b["fair_price"], b["market_price"], b["edge"], b["stake"],
-             b["made_at"], b["status"], b["result"], b["pnl"],
-             b["closing_price"], b["clv"], b["series_state"],
-             b["faircoin_pnl"], b["synthetic"]))
-    conn.execute("DELETE FROM bankroll")
-    for (sid, env), bal in balances.items():
-        peak = STARTING_BANKROLL
-        mdd = 0.0
-        for i, (d, b) in enumerate(bal):
-            peak = max(peak, b)
-            mdd = min(mdd, (b - peak) / peak if peak else 0.0)
-            conn.execute("INSERT INTO bankroll VALUES (?,?,?,?,?,?,?)",
-                         (sid, env, i, d, b,
-                          (b - STARTING_BANKROLL) / STARTING_BANKROLL, mdd))
-    conn.execute("DELETE FROM calibration")
-    for s in strategies:
-        k = (s.sid, s.env)
-        if brier[k]:
+def _append_run_outputs(run_id, all_strategies, runnable, bets, predictions,
+                        balances, metrics, counts, bankrolls) -> None:
+    db.init_db()
+    with db.db() as conn:
+        for strategy in all_strategies:
             conn.execute(
-                "INSERT OR REPLACE INTO calibration "
-                "(strategy_id, env, n_games, brier, log_loss, updated_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (s.sid, s.env, len(brier[k]), float(np.mean(brier[k])),
-                 float(np.mean(logloss[k])), db.utcnow()))
-    for s in strategies:
-        conn.execute(
-            "INSERT OR REPLACE INTO model_versions VALUES (?,?,?,?,?,?)",
-            (f"{s.sid}_v1", s.model, s.env, db.utcnow(),
-             db.jdump({"strategy": s.sid, "model": s.model,
-                       "min_edge": s.min_edge, "market": s.market,
-                       "bankroll": STARTING_BANKROLL}),
-             "walk-forward; verified-corpus gate; real-price + faircoin; "
-             "see audit_log"))
-    conn.commit()
-    conn.close()
-    db.audit("backtest:done",
-             f"settled={n_settled}, eval={n_eval}, proposed={n_proposed}, "
-             f"open={n_open}, totals_skipped_no_score={totals_skipped_no_score}")
+                "INSERT OR IGNORE INTO strategies (strategy_id,name,env,model,market,hypothesis,status,created_at,notes) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (strategy.sid, strategy.name, strategy.env, strategy.model, strategy.market,
+                 strategy.hypothesis, strategy.status, db.utcnow(), strategy.notes),
+            )
+        for row in predictions:
+            conn.execute(
+                "INSERT OR IGNORE INTO predictions "
+                "(prediction_id,strategy_version_id,game_pk,environment,round_code,decision_time,data_cutoff_time,"
+                "selection,model_probability,fair_price,required_price,edge,feature_snapshot_hash,source_observation_ids,"
+                "availability_status,result,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(row[c] for c in ("prediction_id", "strategy_version_id", "game_pk", "environment", "round_code",
+                                      "decision_time", "data_cutoff_time", "selection", "model_probability", "fair_price",
+                                      "required_price", "edge", "feature_snapshot_hash", "source_observation_ids",
+                                      "availability_status", "result", "created_at")),
+            )
+        from .ledger import append_backtest_event
+        for row in bets:
+            cur = conn.execute(
+                "INSERT INTO bets (game_pk,strategy_id,env,season,round_code,market,selection,model_prob,fair_price,"
+                "market_price,edge,stake,made_at,status,result,pnl,closing_price,clv,series_state,synthetic_pnl,synthetic,"
+                "run_id,prediction_id,verification_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(row[c] for c in ("game_pk", "strategy_id", "env", "season", "round_code", "market", "selection",
+                                      "model_prob", "fair_price", "market_price", "edge", "stake", "made_at", "status",
+                                      "result", "pnl", "closing_price", "clv", "series_state", "synthetic_pnl", "synthetic",
+                                      "run_id", "prediction_id", "verification_status")),
+            )
+            if row["verification_status"] == "VERIFIED_PRICE" and row["status"] in {"OPEN", "SETTLED"}:
+                bet_id = int(cur.lastrowid)
+                append_backtest_event(conn, "BACKTEST_SETTLED" if row["status"] == "SETTLED" else "BACKTEST_OPEN", {
+                    "bet_id": bet_id,
+                    "strategy_version_id": f"{row['strategy_id']}_v1",
+                    "game_pk": row["game_pk"], "environment": row["env"],
+                    "round_code": row["round_code"], "market": row["market"],
+                    "selection": row["selection"], "source_id": row.get("quote_source_id"),
+                    "source_url": row.get("quote_source_url"),
+                    "source_observation_id": row.get("quote_source_observation_id"),
+                    "observed_at": row.get("quote_observed_at"),
+                    "availability_at": row.get("quote_available_at"),
+                    "price_american": row.get("quote_price_american"),
+                    "price_decimal": _american_to_decimal(row["quote_price_american"]),
+                    "implied_probability": am_to_prob(row["quote_price_american"]),
+                    "model_probability": row["model_prob"],
+                    "fair_price": row["fair_price"], "required_price": row.get("required_price"),
+                    "edge": row["edge"], "stake": row["stake"],
+                    "execution_status": "BACKTEST_OBSERVED_QUOTE",
+                    "fill_quantity": row["stake"], "closing_price": row["closing_price"],
+                    "result": row["result"], "settlement": row["result"], "pnl": row["pnl"],
+                    "roi": (row["pnl"] / row["stake"] if row["pnl"] is not None and row["stake"] else None),
+                    "verification_status": "VERIFIED",
+                    "payload_json": db.jdump({"run_id": run_id, "prediction_id": row["prediction_id"]}),
+                })
+        for (strategy_id, env), points in metrics.items():
+            if not points:
+                continue
+            p, y = zip(*points)
+            from .evaluation import brier_score, log_loss
+            conn.execute(
+                "INSERT OR REPLACE INTO calibration (strategy_id,env,n_games,brier,log_loss,updated_at) VALUES (?,?,?,?,?,?)",
+                (strategy_id, env, len(points), brier_score(p, y), log_loss(p, y), db.utcnow()),
+            )
+        # Bankroll is a derived run snapshot; unlike immutable_ledger it is
+        # never used as the historical source of wager facts.
+        seq = 0
+        for (strategy_id, env), curve in balances.items():
+            peak = STARTING_BANKROLL
+            for date, balance in curve:
+                peak = max(peak, balance)
+                dd = (balance - peak) / peak if peak else 0.0
+                conn.execute(
+                    "INSERT OR IGNORE INTO bankroll (strategy_id,env,seq,game_date,balance,roi,max_dd) VALUES (?,?,?,?,?,?,?)",
+                    (strategy_id, env, seq, date, balance, (balance - STARTING_BANKROLL) / STARTING_BANKROLL, dd),
+                )
+                seq += 1
 
 
-# ------------------------------------------------------------------ stats
-def _last_bankroll(sid: str, env: str) -> tuple[float, float]:
-    conn = db.connect()
-    last = pd.read_sql(
-        "SELECT balance, max_dd FROM bankroll WHERE strategy_id=? AND env=? "
-        "ORDER BY seq DESC LIMIT 1", conn, params=(sid, env))
-    conn.close()
-    if len(last):
-        return float(last.iloc[0].balance), float(last.iloc[0].max_dd)
-    return STARTING_BANKROLL, 0.0
-
-
-def _faircoin_stats(b: pd.DataFrame) -> pd.DataFrame:
-    """Fair-coin proxy bankroll per strategy x env (2% flat at +100)."""
-    fc = b[b.market == "ML"].copy()
-    fc["pnl_fc"] = fc.faircoin_pnl.fillna(0.0)
+def strategy_stats(run_id: str | None = None) -> pd.DataFrame:
+    """Separate real-price PnL from unpriced evaluation outcomes."""
+    db.init_db()
+    sql = "SELECT * FROM bets" + (" WHERE run_id=?" if run_id else "")
+    bets = db.query_df(sql, (run_id,) if run_id else ())
+    if bets.empty:
+        return pd.DataFrame(columns=["strategy_id", "env", "bets", "eval_picks", "settled", "pnl", "roi", "win_pct"])
     rows = []
-    for (sid, env), sub in fc.groupby(["strategy_id", "env"]):
-        bal = STARTING_BANKROLL
-        seq_bal = [bal]
-        for p in sub.pnl_fc:
-            bal += p
-            seq_bal.append(bal)
-        peak = max(seq_bal)
-        mdd = min((x - peak) / peak if peak else 0.0 for x in seq_bal)
-        rows.append({"strategy_id": sid, "env": env,
-                     "fc_bankroll": bal,
-                     "fc_roi": (bal - STARTING_BANKROLL) / STARTING_BANKROLL,
-                     "fc_max_dd": mdd,
-                     "fc_bets": len(sub)})
-    return pd.DataFrame(rows).set_index(["strategy_id", "env"])
-
-
-def strategy_stats() -> pd.DataFrame:
-    """Per-strategy performance by environment (spec §19, §22)."""
-    conn = db.connect()
-    b = pd.read_sql("SELECT * FROM bets", conn)
-    st = pd.read_sql("SELECT * FROM strategies", conn)
-    tables = {r[0] for r in
-              conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    cal = pd.read_sql("SELECT * FROM calibration", conn) \
-        if "calibration" in tables else None
-    conn.close()
-    stmap = st.set_index("strategy_id")
-    calmap = (cal.set_index(["strategy_id", "env"])
-              if cal is not None and len(cal) else None)
-    fcmap = _faircoin_stats(b)
-
-    rows = []
-    for (sid, env), sub in b.groupby(["strategy_id", "env"]):
-        setl = sub[sub.status == "SETTLED"]
-        real = setl[setl.stake > 0]
-        evalr = sub[sub.status == "EVAL"]
-        pnl = float(real.pnl.sum())
-        stakes = float(real.stake.sum())
-        w = int((setl.result == "W").sum())
-        l = int((setl.result == "L").sum())
-        p = int((setl.result == "P").sum())
-        bank, mdd = _last_bankroll(sid, env)
-        try:
-            fc = fcmap.loc[(sid, env)]
-        except KeyError:
-            fc = None
-        cal_row = None
-        if calmap is not None:
-            try:
-                cal_row = calmap.loc[(sid, env)]
-            except KeyError:
-                pass
-        ev_w = int((evalr.result == "W").sum())
-        ev_l = int((evalr.result == "L").sum())
-        ev_pct = ev_w / (ev_w + ev_l) if (ev_w + ev_l) else np.nan
-        rows.append({
-            "strategy_id": sid, "env": env, "name": stmap.loc[sid, "name"],
-            "bets": len(setl), "open": int((sub.status == "OPEN").sum()),
-            "proposed": int((sub.status == "PROPOSED").sum()),
-            "eval_picks": len(evalr),
-            "wins": w, "losses": l, "pushes": p,
-            "win_pct": w / (w + l) if (w + l) else np.nan,
-            "eval_win_pct": ev_pct,
-            "fair_coin_roi": 2 * (ev_pct - 0.5) if not pd.isna(ev_pct) else np.nan,
-            "stake_sum": stakes,
-            "bankroll": bank, "pnl": pnl,
-            "roi": pnl / stakes if stakes else 0.0,
-            "avg_stake": float(real.stake.mean()) if len(real) else 0.0,
-            "avg_edge": float(setl.edge.mean()) if len(setl) else 0.0,
-            "max_dd": mdd,
-            "fc_bankroll": (float(fc.fc_bankroll) if fc is not None else STARTING_BANKROLL),
-            "fc_roi": (float(fc.fc_roi) if fc is not None else 0.0),
-            "fc_max_dd": (float(fc.fc_max_dd) if fc is not None else 0.0),
-            "fc_bets": (int(fc.fc_bets) if fc is not None else 0),
-            "brier": (float(cal_row.brier) if cal_row is not None else np.nan),
-            "log_loss": (float(cal_row.log_loss)
-                         if cal_row is not None else np.nan),
-        })
+    for (sid, env), group in bets.groupby(["strategy_id", "env"]):
+        scored = group[group.result.isin(["W", "L", "P"])]
+        traded = scored[(group.loc[scored.index, "verification_status"] == "VERIFIED_PRICE") & (scored.stake > 0)]
+        wins, losses = (scored.result == "W").sum(), (scored.result == "L").sum()
+        stake = float(traded.stake.fillna(0).sum())
+        pnl = float(traded.pnl.fillna(0).sum()) if stake else None
+        rows.append({"strategy_id": sid, "env": env, "bets": len(group),
+                     "settled": int((group.status == "SETTLED").sum()),
+                     "eval_picks": int((group.status == "EVAL").sum()),
+                     "open": int((group.status == "OPEN").sum()),
+                     "proposed": int((group.status == "PROPOSED").sum()),
+                     "wins": int(wins), "losses": int(losses),
+                     "win_pct": float(wins / (wins + losses)) if wins + losses else None,
+                     "pnl": pnl, "stake_sum": stake, "roi": pnl / stake if stake else None})
     return pd.DataFrame(rows)
 
 
-def combined_view() -> pd.DataFrame:
-    """All-MLB combined view that PRESERVES the env breakdown (spec §4, §22)."""
-    df = strategy_stats()
-    po_envs = {"POST", "WC", "DS", "LCS", "WS"}
+def combined_view(run_id: str | None = None) -> pd.DataFrame:
+    stats = strategy_stats(run_id)
+    if stats.empty:
+        return stats
     rows = []
-    for sid, d in df.groupby("strategy_id"):
-        reg = d[~d.env.isin(po_envs)]
-        po = d[d.env.isin(po_envs)]
-        tot_stake = float(d.stake_sum.sum())
-        tot_pnl = float(d.pnl.sum())
-        rows.append({
-            "strategy_id": sid,
-            "bets": int(d.bets.sum()),
-            "open": int(d.open.sum()) + int(d.proposed.sum()),
-            "pnl": tot_pnl,
-            "roi": tot_pnl / tot_stake if tot_stake else 0.0,
-            "bankroll": float(d.bankroll.sum()),
-            "reg_bets": int(reg.bets.sum()),
-            "reg_pnl": float(reg.pnl.sum()),
-            "reg_roi": (float(reg.pnl.sum() / reg.stake_sum.sum())
-                        if reg.stake_sum.sum() else 0.0),
-            "po_bets": int(po.bets.sum()),
-            "po_pnl": float(po.pnl.sum()),
-            "po_roi": (float(po.pnl.sum() / po.stake_sum.sum())
-                       if po.stake_sum.sum() else 0.0),
-            "po_fc_bets": int(po.fc_bets.sum()),
-            "po_fc_roi": (float(po.fc_bankroll.sum() -
-                                len(po) * STARTING_BANKROLL)
-                          / (len(po) * STARTING_BANKROLL) if len(po) else 0.0),
-            "best_env": d.loc[d.roi.idxmax(), "env"] if len(d) else None,
-            "worst_env": d.loc[d.roi.idxmin(), "env"] if len(d) else None,
-        })
-    return pd.DataFrame(rows).set_index("strategy_id")
+    for sid, group in stats.groupby("strategy_id"):
+        reg = group[group.env == "REG"]
+        post = group[group.env.isin(["POST", "WC", "DS", "LCS", "WS"])]
+        reg_stake = float(reg.stake_sum.sum())
+        post_stake = float(post.stake_sum.sum())
+        reg_pnl = float(reg.pnl.dropna().sum()) if reg_stake else None
+        post_pnl = float(post.pnl.dropna().sum()) if post_stake else None
+        rows.append({"strategy_id": sid, "bets": int(group.bets.sum()),
+                     "reg_bets": int(reg.bets.sum()), "reg_pnl": reg_pnl,
+                     "reg_roi": (float(reg_pnl / reg_stake) if reg_stake and reg_pnl is not None else None),
+                     "post_bets": int(post.bets.sum()), "post_eval_picks": int(post.eval_picks.sum()),
+                     "post_pnl": post_pnl,
+                     "post_rounds": sorted(post.env.unique().tolist())})
+    return pd.DataFrame(rows)
 
 
 if __name__ == "__main__":
-    # The documented entry point: `python -m mlbcomp.engine.backtest`.
-    res = run_backtest()
-    print(f"[backtest] settled={res['settled_bets']} eval_picks={res['eval_picks']} "
-          f"open={res['open_bets']} proposed={res['proposed_bets']} "
-          f"totals_skipped_no_score={res['totals_skipped_no_score']}")
-    print(f"[backtest] round intercepts (promoted from prior PO seasons): "
-          f"{res['round_intercepts']}")
-    st = strategy_stats()
-    agg = (st.groupby("env")
-             .agg(strategies=("strategy_id", "nunique"),
-                  bets=("bets", "sum"),
-                  eval_picks=("eval_picks", "sum"),
-                  stake=("stake_sum", "sum"),
-                  pnl=("pnl", "sum"),
-                  fc_bets=("fc_bets", "sum"))
-             .reindex(["REG", "POST", "WC", "DS", "LCS", "WS"])
-             .dropna(how="all"))
-    agg["roi"] = (agg.pnl / agg.stake).where(agg.stake > 0)
-    print("\n[backtest] per-environment totals")
-    print(agg.to_string())
+    print(run_backtest())

@@ -1,8 +1,12 @@
-"""Fetch raw Stats API JSON dumps for all postseason games (2015-2025).
+"""Fetch candidate postseason raw files for a source-validation run.
 
-Fetches mlb/raw/<season>/<game_pk>.json.gz directly for every postseason
-game_pk from the schedule.  A 404 means the raw mirror lacks that game (a
-signal that the pk may be fabricated).
+Fetches ``mlb/raw/<season>/<game_pk>.json.gz`` from the configured GitHub
+mirror for postseason game IDs already present in a local schedule snapshot.
+A 404 means that the requested path was not retrieved; it is an availability
+issue to record, not evidence that a game ID or result was fabricated.  This
+script does not create fallback rows, scores, winners, odds, or settlement
+labels.  The resulting files still require manifest, license and content
+validation before research use.
 """
 from __future__ import annotations
 
@@ -18,7 +22,6 @@ import pandas as pd
 GITHUB = os.environ.get("GITHUB_TOKEN", "")
 REPO = "sportsdataverse/baseballr-data"
 RAW_DIR = "data/raw/statsapi"
-SEASONS = list(range(2015, 2026))
 os.makedirs(RAW_DIR, exist_ok=True)
 
 

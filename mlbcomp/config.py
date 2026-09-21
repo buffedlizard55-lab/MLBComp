@@ -1,11 +1,12 @@
-"""MLBComp configuration — constants for the autonomous MLB betting research system.
+"""Configuration and shared quantitative conventions for MLBComp.
 
-Environments (spec §1, §4, §32): the competition is split into FIVE distinct
-environments. Regular-season and postseason results are never collapsed into a
-single leaderboard number without preserving the breakdown.
+The project is deliberately conservative: an observed value is either backed by
+an immutable provenance record or it is marked unavailable.  In particular,
+missing historical odds are *not* converted into a made-up +100 quote.
 """
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -14,111 +15,133 @@ DATA = ROOT / "data"
 RAW = DATA / "raw"
 FEAT = DATA / "features"
 DB_PATH = DATA / "mlbcomp.db"
+for _path in (DATA, RAW, FEAT):
+    _path.mkdir(parents=True, exist_ok=True)
 
-for _p in (DATA, RAW, FEAT):
-    _p.mkdir(parents=True, exist_ok=True)
+# The snapshot date is explicit and overridable for reproducible rebuilds.
+TODAY = os.environ.get("MLBCOMP_AS_OF", "2026-09-21")
+SEASON_LIVE = 2026
+SEASONS_ALL = list(range(2015, SEASON_LIVE + 1))
+SEASONS_WITH_ODDS = list(range(2019, 2026))
+POSTSEASON_SEASONS = list(range(2015, 2026))
 
-# ---------------------------------------------------------------- seasons
-# Regular-season backtest window with real market odds available (2019-2025,
-# cesar-dx/mlb-betting-ml source). 2015-2018 are ingested for model-only
-# strategies and long-horizon research but have no verified market prices.
-SEASONS_ALL = list(range(2015, 2027))          # ingested (2026 = live, in progress)
-SEASONS_WITH_ODDS = list(range(2019, 2026))    # verified real moneyline odds
-SEASON_LIVE = 2026                              # in-progress season (paper trading)
-POSTSEASON_SEASONS = list(range(2015, 2026))   # complete postseasons
-TODAY = "2026-09-20"                            # data snapshot date
-
-# ------------------------------------------------------- round codes
-# baseballr schedule game_type codes: R=regular, F=first round (wild card),
-# D=division series, L=league championship, W=world series, S=spring, E=exhibition.
 ROUND_BY_TYPE = {"F": "WC", "D": "DS", "L": "LCS", "W": "WS"}
+ROUNDS = ["WC", "DS", "LCS", "WS"]
 ROUND_LABEL = {
     "WC": "Wild Card",
     "DS": "Division Series",
     "LCS": "League Championship Series",
     "WS": "World Series",
 }
-ROUNDS = ["WC", "DS", "LCS", "WS"]
 ROUND_FORMAT = {"WC": "BO3", "DS": "BO5", "LCS": "BO7", "WS": "BO7"}
 
-# ------------------------------------------------------- competitions
-# Each competition has its own strategies, models, backtests, ledger,
-# leaderboard and bankroll (spec §4, §19).
+# Environments are intentionally not aliases.  POST is the all-round
+# postseason competition; WC/DS/LCS/WS are four separate competitions.
 ENVS = ["REG", "POST", "WC", "DS", "LCS", "WS", "ALL"]
 ENV_LABEL = {
     "REG": "Regular Season",
-    "POST": "Postseason (all rounds)",
+    "POST": "Postseason — all rounds",
     "WC": "Wild Card",
     "DS": "Division Series",
-    "LCS": "LCS",
+    "LCS": "League Championship Series",
     "WS": "World Series",
-    "ALL": "All MLB (combined)",
+    "ALL": "All MLB — breakdown preserved",
 }
-# Postseason bets also roll up into the combined environments:
-ENV_ROLLUP = {"WC": ("POST", "ALL"), "DS": ("POST", "ALL"),
-              "LCS": ("POST", "ALL"), "WS": ("POST", "ALL"),
-              "REG": ("ALL",), "POST": ("ALL",), "ALL": ()}
+ENV_ROLLUP = {"REG": ("ALL",), "POST": ("ALL",),
+              "WC": ("POST", "ALL"), "DS": ("POST", "ALL"),
+              "LCS": ("POST", "ALL"), "WS": ("POST", "ALL"), "ALL": ()}
 
-# ------------------------------------------------------- bankroll / staking
-STARTING_BANKROLL = 10_000.0     # per strategy, per competition
-KELLY_FRACTION = 0.25            # quarter-Kelly
-MAX_STAKE_PCT = 0.05             # hard cap: 5% of current bankroll
-MIN_EDGE = 0.02                  # default min model edge (in prob) to bet
-
-# ------------------------------------------------------- rejection rules
-MIN_BETS_FOR_VERDICT = 30        # below this: INSUFFICIENT_SAMPLE (no verdict)
-ROI_REJECT_THRESHOLD = -0.02     # ROI at or below -2% with adequate sample
-ROI_PROMOTE_THRESHOLD = 0.02     # ROI above +2% AND bootstrap CI lower > 0
-BOOTSTRAP_REPS = 1000
+STARTING_BANKROLL = 10_000.0
+KELLY_FRACTION = 0.25
+MAX_STAKE_PCT = 0.05
+MIN_EDGE = 0.02
+MIN_BETS_FOR_VERDICT = 30
+BOOTSTRAP_REPS = 1_000
 RANDOM_SEED = 42
 
-# ------------------------------------------------------- market conversion
-def am_to_prob(odds: float) -> float:
-    """American odds -> implied probability (includes vig)."""
-    if odds is None or odds != odds:  # NaN
-        return float("nan")
-    if odds < 0:
-        return -odds / (-odds + 100.0)
-    return 100.0 / (odds + 100.0)
-
-def prob_to_am(p: float) -> float:
-    """Probability -> American odds (no margin)."""
-    if p <= 0:
-        return -1000.0
-    if p >= 1:
-        return 1000.0
-    if p <= 0.5:
-        return round(100.0 * p / (1.0 - p), 1)
-    return round(-100.0 * (1.0 - p) / p, 1)
-
-def devig_two(p_home: float, p_away: float) -> tuple[float, float]:
-    """Proportional devigging of a 2-way moneyline."""
-    s = p_home + p_away
-    if s <= 0:
-        return 0.5, 0.5
-    return p_home / s, p_away / s
-
-# ------------------------------------------------------- research
-# The 28 research questions from spec §28.
-RESEARCH_QUESTIONS = [
-    ("Q01", "Does postseason scoring differ materially from regular-season scoring?"),
-    ("Q02", "Does starting-pitcher usage (leash) change in the postseason?"),
-    ("Q03", "Does bullpen usage change in the postseason?"),
-    ("Q04", "Does manager behavior become more predictable in the postseason?"),
-    ("Q05", "Do teams shorten their lineups in the postseason?"),
-    ("Q06", "Does defensive substitution increase in the postseason?"),
-    ("Q07", "Does the market price postseason favorites differently?"),
-    ("Q08", "Does public attention change market efficiency in the postseason?"),
-    ("Q09", "Does the value of recent form change in the postseason?"),
-    ("Q10", "Does late-season performance predict postseason performance better than full-season performance?"),
-    ("Q11", "Does information from earlier series games improve later-game predictions?"),
-    ("Q12", "Does series state create measurable behavioral effects?"),
-    ("Q13", "Are elimination games materially different?"),
-    ("Q14", "Are clinching games materially different?"),
-    ("Q15", "Does a team's postseason experience contain measurable predictive information?"),
-    ("Q16", "Does travel between rounds matter?"),
-    ("Q17", "Does bullpen fatigue become more important in the postseason?"),
-    ("Q18", "Does starting-pitcher leash become more important in the postseason?"),
-    ("Q19", "Do market movements react differently to postseason lineup announcements?"),
-    ("Q20", "Does postseason-specific modeling outperform simply applying the regular-season model?"),
+# Explicit market names used across the normalized market, strategy and UI
+# layers.  A market can be in the catalog without being available in a source.
+MARKETS = [
+    "ML", "RL", "TOTAL", "TEAM_TOTAL", "F5_ML", "F5_TOTAL", "NRFI", "YRFI",
+    "INNING", "PLAYER_PROP", "PITCHER_PROP", "ALT_LINE", "FUTURES", "LIVE",
+    "EXCHANGE", "PREDICTION_MARKET",
 ]
+
+
+def am_to_prob(odds: float | int | None) -> float:
+    """Return the vig-inclusive implied probability for valid American odds."""
+    if odds is None:
+        return float("nan")
+    try:
+        value = float(odds)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not math.isfinite(value) or value == 0:
+        return float("nan")
+    return -value / (-value + 100.0) if value < 0 else 100.0 / (value + 100.0)
+
+
+def american_to_decimal(odds: float | int) -> float:
+    value = float(odds)
+    if not math.isfinite(value) or value == 0:
+        raise ValueError("American odds must be finite and non-zero")
+    return 1.0 + (100.0 / abs(value) if value < 0 else value / 100.0)
+
+
+def prob_to_am(probability: float) -> float:
+    """Convert a fair probability to American odds without rounding away edge."""
+    p = float(probability)
+    if not 0 < p < 1:
+        raise ValueError("probability must be strictly between zero and one")
+    return round(100.0 * p / (1.0 - p), 1) if p <= 0.5 else round(-100.0 * (1.0 - p) / p, 1)
+
+
+def devig_two(home_probability: float, away_probability: float) -> tuple[float, float]:
+    """Proportional two-way de-vig.  Invalid books return NaNs, never 50/50."""
+    h, a = float(home_probability), float(away_probability)
+    if not (math.isfinite(h) and math.isfinite(a) and h > 0 and a > 0):
+        return float("nan"), float("nan")
+    total = h + a
+    return h / total, a / total
+
+
+# Research questions are stored in the DB as durable hypotheses.  Findings are
+# only generated when the required fields pass their point-in-time data gate.
+RESEARCH_QUESTIONS = [
+    ("Q01", "Does postseason scoring differ from regular-season scoring?"),
+    ("Q02", "Does postseason run-margin volatility differ from regular season?"),
+    ("Q03", "Does home advantage differ by environment or round?"),
+    ("Q04", "Does starting-pitcher usage or leash change in postseason?"),
+    ("Q05", "Does bullpen workload or availability change in postseason?"),
+    ("Q06", "Does lineup construction or platoon usage change in postseason?"),
+    ("Q07", "Do managerial substitutions or defensive changes change in postseason?"),
+    ("Q08", "Does pitch mix or velocity retain a postseason-specific effect?"),
+    ("Q09", "Does late-season form add information beyond multi-year and season priors?"),
+    ("Q10", "Does series state affect game outcomes after controlling for team strength?"),
+    ("Q11", "Are elimination and clinching games measurably different?"),
+    ("Q12", "Does game number or home-field pattern matter within a series?"),
+    ("Q13", "Do rest and travel affect postseason performance?"),
+    ("Q14", "Does the market price postseason favorites or public attention differently?"),
+    ("Q15", "Does regular-season transfer outperform postseason adjustment?"),
+    ("Q16", "Does a dedicated postseason model outperform the transfer control?"),
+    ("Q17", "Do round-specific models outperform one all-postseason model?"),
+    ("Q18", "Does hierarchical partial pooling improve calibration?"),
+    ("Q19", "Which market families have reliable historical prices?"),
+    ("Q20", "Do model changes improve out-of-sample performance?"),
+]
+
+VERIFICATION_STATUSES = {
+    "VERIFIED",
+    "PARTIALLY_VERIFIED",
+    "NOT_VERIFIED",
+    "UNAVAILABLE",
+    "CONFLICTING",
+    "REJECTED",
+}
+
+# Distinguish the reason a result is absent.  These strings are part of the
+# static-data contract consumed by the website.
+DATA_STATUSES = {
+    "VERIFIED", "UNVERIFIED", "DATA_UNAVAILABLE", "NOT_RUN", "INSUFFICIENT_SAMPLE",
+    "PROPOSED", "OPEN", "SETTLED", "VOID", "CORRECTED",
+}

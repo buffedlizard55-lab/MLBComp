@@ -1,47 +1,36 @@
-"""Source registry + canonical data build (ingest).
+"""Source registry and source-gated data builders.
 
-Sources
--------
-S1  sportsdataverse/baseballr-data  (github.com)
-    MLB schedule (1988-2026) + play-by-play (1988-2026) parquet exports.
-    2026 file is live through 2026-09-20 (snapshot date).
-S2  cesar-dx/mlb-betting-ml (github.com)
-    Real moneyline odds (American) + outcomes + per-game statcast form
-    features, 2019-2025 REGULAR SEASON ONLY (verified: files end at the
-    2025 regular season; the 2021 file ends 2021-09-27).  No verified
-    postseason prices exist in this environment.
+This module contains adapters for candidate public repositories.  The checkout
+intentionally ships without their raw snapshots, so the descriptions below are
+discovery metadata, not assertions that a URL was reachable, licensed, or
+complete during the current run.  A caller must fetch a snapshot, record its
+manifest and verification status, and only then promote normalized rows for
+research or settlement.
 
-POSTSEASON AUTHENTICITY (re-audited 2026-09-21 — supersedes the 2026-09-20
-claim that the mirror's postseason was "partially fabricated"):
-    The S1 mirror's postseason is AUTHENTIC.  Its World Series rows for all
-    eleven seasons 2015-2025 reproduce the independently documented champions
-    and series lengths exactly (2015 KC 4-1 NYM, 2016 CHC 4-3 CLE, 2017 HOU
-    4-3 LAD, 2018 BOS 4-1 LAD, 2019 WAS 4-3 HOU, 2020 LAD 4-2 TB, 2021 ATL
-    4-2 HOU, 2022 HOU 4-2 PHI, 2023 TEX 4-1 ARI, 2024 LAD 4-1 NYY, 2025 LAD
-    4-3 TOR).  The earlier "fabrication" finding was an artefact of a wrong
-    KNOWN_WS_CHAMPIONS table in this file (5 of 11 champions were wrong),
-    not a property of the source.  KNOWN_WS_CHAMPIONS is now correct and
-    verify/checks.py fails loudly on any mismatch instead of quarantining.
-    The mirror's real postseason scores (502 games, 2015-2026) are therefore
-    used directly; see features/po_corpus.py.
+Candidates
+----------
+S1  sportsdataverse/baseballr-data — schedule and play-by-play parquet
+    exports; exact historical depth and current coverage must be measured from
+    the retrieved manifest.
+S2  cesar-dx/mlb-betting-ml — candidate historical moneyline/statcast files;
+    exact years, markets, licensing and postseason coverage must be measured
+    from retrieved files.  No historical price is assumed here.
 
-    Known source quirks that ARE real and are handled, not quarantined:
-      * 2022 WS Game 3 (2022-10-31) was rain-suspended and completed the next
-        day; the mirror carries a Final row with null scores.  Rows with a
-        null score are treated as unsettled (never scored), and the series is
-        still reconstructed correctly from the remaining games.
+No postseason result, row count, champion, score, odds record or source
+availability is asserted by this adapter.  Missing, blocked, conflicting or
+unlicensed content remains DATA_UNAVAILABLE until an operator records the
+relevant observation and validation evidence.  The optional reference mapping
+below is only a validation aid; it is not a source observation and never
+creates games or settlement labels.
 
-Rejected / unavailable (flagged per spec §35 — no invented data):
-R1  statsapi.mlb.com (MLB Stats API) — network-blocked in this environment.
-R2  baseballsavant.com (Statcast) — network-blocked.
-R3  fivethirtyeight/data/mlb (historical odds 2015-2020) — dataset removed
-    from the repo in 2024; forks re-synced, no longer available.
-R4  OddsPortal / sportsbook historical odds scrapers — no verified source.
-R5  Weather feeds (OpenWeather, NWS) — network-blocked; weather strategies
-    are marked DATA_UNAVAILABLE instead of estimated.
+Rejected / unavailable candidates are retained in the source registry rather
+than silently substituted: Stats API, Baseball Savant/Statcast, historical
+odds mirrors without verifiable provenance, weather feeds, and commercial
+markets that cannot be accessed under their terms.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from datetime import datetime
 
@@ -49,7 +38,7 @@ import numpy as np
 import pandas as pd
 
 from .. import db
-from ..config import FEAT, RAW, SEASONS_ALL, SEASONS_WITH_ODDS, TODAY
+from ..config import FEAT, RAW, ROOT, SEASONS_ALL, SEASONS_WITH_ODDS, TODAY
 
 SCHEDULE_DIR = RAW / "baseballr" / "schedule"
 PBP_DIR = RAW / "baseballr" / "pbp"
@@ -81,20 +70,16 @@ ABBREV_TO_LEAGUE = {
     "LAD": "NL", "SD": "NL", "SF": "NL", "COL": "NL", "AZ": "NL",
     "ATL": "NL", "NYM": "NL", "PHI": "NL", "MIA": "NL", "WAS": "NL",
 }
-# NOTE: the source's numeric team ids are NOT stable across years (e.g. the
-# Padres are 135 in 2025 but 124 in 2019).  game_pk and team NAME/abbreviation
-# ARE stable.  We therefore use the abbreviation as the canonical key and
-# assign our own stable canonical team ids (independent of the source ids).
+# Treat source numeric team IDs as potentially versioned.  When a snapshot is
+# actually loaded, game_pk plus normalized team names/abbreviations are used as
+# the cross-source keys; this adapter assigns its own stable canonical IDs.
 CANON_ABBR_TO_ID = {abbr: i + 1 for i, abbr in enumerate(sorted(ABBREV_TO_LEAGUE.keys()))}
 TEAM_ID_TO_ABBR = {tid: abbr for abbr, tid in CANON_ABBR_TO_ID.items()}
 TEAM_ID_TO_NAME: dict[int, str] = {}  # filled with latest display name per team
 
-# Independently documented World Series champions 2015-2025 (public record).
-# Cross-checked 2026-09-21 against four independent public listings
-# (mlbschedule.net, baseballnewsplus.com, surprisesports.com,
-# baseballstandard.com) which agree on every season listed here.  These are
-# used ONLY as an external cross-check of the ingested mirror; the mirror is
-# the data source.  A mismatch is a hard verification FAILURE.
+# Optional operator-supplied validation reference.  It is retained for
+# controlled source audits only; it is not fetched data, does not verify a URL,
+# and must never be used to create a missing game or settlement label.
 KNOWN_WS_CHAMPIONS = {
     2015: "KC",   # Royals over Mets 4-1
     2016: "CHC",  # Cubs over Indians 4-3
@@ -149,59 +134,14 @@ def haversine_km(a, b):
 
 # ---------------------------------------------------------------- loaders
 def register_sources(conn) -> None:
-    rows = [
-        ("S1_baseballr_data", "https://github.com/sportsdataverse/baseballr-data",
-         "MLB schedule + play-by-play parquet, 1988-2026 (2026 live through 2026-09-20)",
-         "games, scores, venues, series, at-bats, pitchers, batters", 1, None,
-         db.utcnow(),
-         "fetched per-season via api.github.com git-blobs into data/raw/baseballr "
-         "(blob SHAs recorded in data/raw/FETCH_MANIFEST.json). REGULAR SEASON "
-         "2015-2026 trusted (2019-2025 independently cross-verified via S2: "
-         "date+team join with zero mismatches and 100% outcome agreement). "
-         "POSTSEASON 2015-2025 also trusted: its World Series rows reproduce all "
-         "11 independently documented champions and series lengths exactly "
-         "(see KNOWN_WS_CHAMPIONS). The 2026-09-20 claim that this source's "
-         "postseason was fabricated was wrong — it was caused by an incorrect "
-         "champion table, not by the data."),
-        ("S2_cesar_odds", "https://github.com/cesar-dx/mlb-betting-ml",
-         "Real moneyline odds (American) + outcomes + statcast form features",
-         "2019-2025 REGULAR SEASON ONLY (verified: 2021 file ends 2021-09-27; "
-         "no postseason odds in any year)",
-         1, None, db.utcnow(),
-         "cloned into data/raw/odds. 15,442 rows joined with 0 mismatches. "
-         "NO verified market prices exist for any 2019-2025 postseason game -> "
-         "PO ROI is reported as a labeled fair-coin proxy, not real market ROI."),
-        ("S3_statsapi_mirror", "https://github.com/sportsdataverse/baseballr-data (mlb/raw)",
-         "Per-game MLB Stats API responses (json.gz), 1988-2026",
-         "440 postseason dumps fetched by game_pk into data/raw/statsapi", 0,
-         "NOT an independent source: same mirror family as S1; all 440 dumps "
-         "carry null scores, so they corroborate dates/teams only", db.utcnow(),
-         "dates/teams match S1 schedule for all 440 pks. NOTE: the earlier claim "
-         "that a '2016 WS' dump showed a game that never occurred was wrong — "
-         "2016-10-25 Cubs@Indians was World Series Game 1 and did occur. "
-         "Still not used for settlement (null scores)."),
-        ("R1_statsapi", "https://statsapi.mlb.com",
-         "MLB Stats API (live boxscores, weather, lineups)", "—", 0,
-         "network-blocked in this environment", db.utcnow(),
-         "live 2026 data comes from the S1 snapshot instead"),
-        ("R2_baseballsavant", "https://www.baseballsavant.com",
-         "Statcast pitch-level data", "—", 0,
-         "network-blocked in this environment", db.utcnow(),
-         "K/BB/HR rates approximated from S1 play-by-play events"),
-        ("R3_fivethirtyeight", "https://github.com/fivethirtyeight/data",
-         "Historical odds 2015-2020", "—", 0,
-         "dataset removed from repo (2024); forks re-synced empty", db.utcnow(),
-         "market strategies therefore backtest 2019-2025 only"),
-        ("R4_oddsportal", "https://www.oddsportal.com",
-         "Historical sportsbook odds", "—", 0,
-         "no verifiable scrape available without API key; anti-bot", db.utcnow(),
-         "rejected rather than estimated"),
-        ("R5_weather", "OpenWeather/NWS", "Game-day weather", "—", 0,
-         "network-blocked; S1 schedule has no weather field", db.utcnow(),
-         "weather-dependent hypotheses flagged DATA_UNAVAILABLE"),
-    ]
-    for r in rows:
-        conn.execute("INSERT OR REPLACE INTO source_registry VALUES (?,?,?,?,?,?,?,?)", r)
+    """Register discovery records without claiming that a fetch was verified.
+
+    The old implementation upgraded two URLs to verified before the content
+    and license gates ran.  Ingest now delegates to the richer source catalog;
+    validators can promote individual observations later.
+    """
+    from ..sources import register_catalog
+    register_catalog()
 
 
 def load_schedules(years) -> pd.DataFrame:
@@ -521,17 +461,62 @@ def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
                 (o.away_name != o.src_away))
     dropped = int(mismatch.sum())
     o = o[~mismatch]
-    out = o[["game_pk", "game_date", "home_odds", "away_odds", "home_winner",
-             "home_win_pct_to_date", "away_win_pct_to_date",
-             "home_last5_o_hardhit", "away_last5_o_hardhit",
-             "home_last5_o_xwoba", "away_last5_o_xwoba",
-             "home_last_p_hardhit", "away_last_p_hardhit",
-             "home_last_p_xwoba", "away_last_p_xwoba"]].copy()
-    for c in out.columns:
-        if out[c].dtype == object:
-            out[c] = pd.to_numeric(out[c], errors="coerce")
+    base_columns = ["game_pk", "game_date", "home_odds", "away_odds", "home_winner",
+                    "home_win_pct_to_date", "away_win_pct_to_date",
+                    "home_last5_o_hardhit", "away_last5_o_hardhit",
+                    "home_last5_o_xwoba", "away_last5_o_xwoba",
+                    "home_last_p_hardhit", "away_last_p_hardhit",
+                    "home_last_p_xwoba", "away_last_p_xwoba"]
+    # Optional quote metadata is required for a price to be eligible for a
+    # wager.  If the source lacks it, preserve the price as an unverified
+    # research field rather than inventing a timestamp or availability claim.
+    optional = ["observed_at", "available_at", "source_id", "source_url", "source_observation_id", "verification_status", "closing_flag"]
+    for column in optional:
+        if column not in o.columns:
+            o[column] = None if column != "verification_status" else "UNVERIFIED"
+    out = o[base_columns + optional].copy()
+    numeric = [c for c in base_columns if c not in {"game_pk", "game_date", "home_winner"}]
+    for c in numeric:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    out["verification_status"] = out["verification_status"].fillna("UNVERIFIED").astype(str)
     out.to_parquet(FEAT / "odds.parquet", index=False)
     return len(out), dropped
+
+
+def _record_dataset_observations() -> None:
+    """Record content-addressed local dataset observations when a manifest exists."""
+    manifest_path = RAW / "FETCH_MANIFEST.json"
+    if not manifest_path.exists():
+        return
+    try:
+        import json
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        db.record_issue("FETCH-MANIFEST-INVALID", "SOURCE", "FETCH_MANIFEST.json is not valid JSON", "HIGH")
+        return
+    db.init_db()
+    with db.db() as conn:
+        for item in manifest.get("files", []):
+            dest = ROOT / item.get("dest", "")
+            if not dest.exists():
+                conn.execute(
+                    "INSERT OR REPLACE INTO data_issues (issue_id,issue_type,severity,status,entity_type,entity_id,description,source_ids,detected_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (f"MISSING:{item.get('dest')}", "SOURCE", "HIGH", "OPEN", "dataset", item.get("dest"),
+                     "Manifest file is missing from the local snapshot", "[]", db.utcnow()),
+                )
+                continue
+            digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+            status = "RETRIEVED" if digest == item.get("sha256", digest) or item.get("blob_sha") else "RETRIEVED"
+            oid = f"dataset:{item.get('source_repo')}:{item.get('source_path')}:{item.get('blob_sha', digest)}"
+            conn.execute(
+                "INSERT OR REPLACE INTO source_observations "
+                "(observation_id,source_id,source_locator,record_key,retrieval_time,checksum,verification_status,notes) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (oid, "sportsdataverse_baseballr" if "sportsdataverse" in str(item.get("source_repo")) else "cesar_dx_mlb_odds",
+                 item.get("source_path"), item.get("dest"), item.get("fetched_utc", db.utcnow()), digest,
+                 status, "Content retrieved; dataset-specific validators still required"),
+            )
 
 
 # ------------------------------------------------------------------ build
@@ -540,7 +525,10 @@ def build() -> None:
     t0 = datetime.now()
     conn = db.connect()
     db.audit("ingest:start", f"seasons={SEASONS_ALL}, snapshot={TODAY}")
+    from ..sources import register_catalog
+    register_catalog()
     register_sources(conn)
+    _record_dataset_observations()
 
     games = load_schedules(SEASONS_ALL)
     odds = load_odds(SEASONS_WITH_ODDS)
