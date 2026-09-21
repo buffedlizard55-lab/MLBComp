@@ -1,481 +1,277 @@
-"""Export the static GitHub Pages site data FROM THE DATABASE.
+"""Build the GitHub Pages payload from the database, never from random data.
 
-Why this exists: `data/*.json` used to be produced by
-`scripts/generate_mlbcomp_data.py`, which invented its content with
-`random.uniform` / `random.choice` — odds, model probabilities, edges, CLV,
-win/loss results, "actual scores", Kalshi bid/ask/liquidity/fills and even the
-2026-09-20 game slate and probable starters — and then stamped every record
-`"verification_status": "VERIFIED_PRIMARY"`.  The site rendered that as the
-competition.  That generator is retired; this module is the only writer of
-`data/*.json`, and every value it emits comes from `data/mlbcomp.db`, which is
-built from the two fetched public sources.
-
-Honesty rules enforced here:
-  * no record is labeled verified unless it settled against a real price;
-  * picks with no market price are labeled NO_MARKET_PRICE (they are model
-    evaluation picks, not trades);
-  * totals settled against the synthetic 8.5 line are labeled SYNTHETIC_LINE;
-  * Kalshi is exported as an EMPTY list — api.elections.kalshi.com is not
-    reachable from this environment, so there are no real contracts, quotes,
-    fills or PnL to show (spec: never invent fills or liquidity);
-  * the source registry is the DB's registry (8 real entries, 5 of them
-    recorded as rejected/unavailable), not a list of plausible-sounding APIs.
-
-Usage:  python3 -m mlbcomp.web.export_static [--ledger-cap 20000]
+When the checkout has no fetched source snapshot, export still succeeds with a
+truthful ``NO_SOURCE_SNAPSHOT`` dashboard: strategy hypotheses and controls are
+visible, while games, prices, bets, fills, results and PnL remain empty.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
+import math
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from ..config import DATA, DB_PATH, ENV_LABEL
+from .. import db
+from ..config import DATA, FEAT, ENVS, ENV_LABEL, ROUNDS, ROUND_LABEL, STARTING_BANKROLL, TODAY
+from ..engine.catalog import register_catalog
+from ..engine.strategies import build_catalog
+from ..sources import registry_snapshot
 
-LEDGER_CAP_DEFAULT = 20000
-
-
-def _conn() -> sqlite3.Connection:
-    if not DB_PATH.exists():
-        raise SystemExit(f"missing {DB_PATH} — run `python -m mlbcomp.ingest.baseballr` first")
-    return sqlite3.connect(DB_PATH)
+LEDGER_CAP_DEFAULT = 20_000
 
 
-def _matchups(conn) -> dict[int, str]:
-    """game_pk -> 'AWY @ HOME' using canonical team abbreviations."""
-    df = pd.read_sql(
-        "SELECT g.game_pk, a.abbr AS away, h.abbr AS home FROM games g "
-        "JOIN teams a ON a.team_id = g.away_team_id "
-        "JOIN teams h ON h.team_id = g.home_team_id", conn)
-    return {int(r.game_pk): f"{r.away} @ {r.home}" for r in df.itertuples()}
+def _clean(value: Any):
+    if isinstance(value, float) and (not math.isfinite(value)):
+        return None
+    if isinstance(value, dict):
+        return {k: _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    if hasattr(value, "item"):
+        try:
+            return _clean(value.item())
+        except (ValueError, TypeError):
+            pass
+    return value
 
 
-def _scores(conn) -> dict[int, str]:
-    df = pd.read_sql(
-        "SELECT g.game_pk, a.abbr AS away, h.abbr AS home, g.away_score, "
-        "g.home_score FROM games g "
-        "JOIN teams a ON a.team_id = g.away_team_id "
-        "JOIN teams h ON h.team_id = g.home_team_id "
-        "WHERE g.home_score IS NOT NULL", conn)
-    return {int(r.game_pk): f"{r.away} {int(r.away_score)} - {r.home} {int(r.home_score)}"
-            for r in df.itertuples()}
+def _write(name: str, value: Any) -> None:
+    (DATA / name).write_text(json.dumps(_clean(value), indent=2, allow_nan=False, default=str) + "\n")
 
 
-def _priced_pks() -> set[int]:
-    """game_pks that carry a REAL observed price (cesar-dx moneylines).
-
-    The engine writes an assumed +100 (p=0.5) into `bets.market_price` when a
-    game has no verified price, so that column alone cannot tell a real quote
-    from a placeholder.  This set is the authority.
-    """
-    from ..config import FEAT
-    p = FEAT / "odds.parquet"
-    if not p.exists():
-        return set()
-    o = pd.read_parquet(p)
-    return {int(x) for x in o.loc[o.home_odds.notna(), "game_pk"]}
+def _db_frame(sql: str, params=()) -> pd.DataFrame:
+    try:
+        return db.query_df(sql, params)
+    except Exception:
+        return pd.DataFrame()
 
 
-PRICED = _priced_pks()
+def _strategy_records() -> list[dict[str, Any]]:
+    catalog = register_catalog(build_catalog())
+    return [s.to_record() for s in catalog]
 
 
-def _verification(game_pk, synthetic) -> str:
-    """Provenance label for a single wager — never overstates.
-
-    ASSUMED_PRICE_PLUS100 is the engine's placeholder for games with no
-    observed market price (all postseason games, REG 2015-18 and REG 2026).
-    Those rows are model-evaluation picks settled at an invented even-money
-    price, not trades.
-    """
-    if synthetic:
-        return "SYNTHETIC_LINE"
-    if int(game_pk) in PRICED:
-        return "VERIFIED_PRICE"
-    return "ASSUMED_PRICE_PLUS100"
-
-
-def _clean(o):
-    """Recursively replace NaN/Infinity with None — they are not valid JSON
-    and would make every fetch(...).then(r => r.json()) on the site throw."""
-    if isinstance(o, float):
-        return None if (o != o or o in (float("inf"), float("-inf"))) else o
-    if isinstance(o, dict):
-        return {k: _clean(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [_clean(v) for v in o]
-    return o
-
-
-def _write(name: str, obj) -> int:
-    p = DATA / name
-    p.write_text(json.dumps(_clean(obj), indent=2, default=str, allow_nan=False))
-    n = len(obj) if isinstance(obj, (list, dict)) else 1
-    print(f"  {name:26s} {n:>8,} records")
-    return n
-
-
-def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict:
-    conn = _conn()
-    mu, sc = _matchups(conn), _scores(conn)
-    strat = pd.read_sql("SELECT * FROM strategies", conn)
-    sname = dict(zip(strat.strategy_id, strat.name))
-
-    bets = pd.read_sql("SELECT * FROM bets", conn)
-    bets["matchup"] = bets.game_pk.map(mu).fillna("(unknown)")
-    bets["actual_score"] = bets.game_pk.map(sc).fillna("")
-    bets["username"] = bets.strategy_id
-
-    settled = bets[bets.status == "SETTLED"].copy()
-    proposed = bets[bets.status.isin(["PROPOSED", "OPEN"])].copy()
-
-    # pricing provenance per wager (the engine's market_price column cannot
-    # distinguish a real quote from its assumed +100 placeholder)
-    bets["pricing"] = [
-        ("SYNTHETIC_LINE" if s else
-         ("VERIFIED_PRICE" if int(pk) in PRICED else "ASSUMED_PRICE_PLUS100"))
-        for pk, s in zip(bets.game_pk, bets.synthetic.astype(bool))]
-    settled["pricing"] = bets.loc[settled.index, "pricing"]
-    settled["is_verified"] = settled.pricing == "VERIFIED_PRICE"
-
-    print(f"[export] db: {len(bets):,} bets ({len(settled):,} settled, "
-          f"{len(proposed):,} open/proposed), {len(strat)} strategies")
-
-    # ---------------------------------------------------------- leaderboard
-    # NOTE: `bets.result` stores 'W'/'L'/'P'; an earlier version of this
-    # exporter filtered on 'WIN'/'LOSS' and silently produced a null win rate
-    # for every strategy.  Metrics are split by pricing provenance so a
-    # real-price result is never blended with an assumed-price one.
-    cal = pd.read_sql("SELECT strategy_id, env, brier, log_loss, n_games FROM calibration", conn)
+def _metrics() -> pd.DataFrame:
+    bets = _db_frame("SELECT * FROM bets")
+    if bets.empty:
+        return pd.DataFrame()
     rows = []
-    for (sid, env), sub in bets.groupby(["strategy_id", "env"]):
-        # status: SETTLED = traded at a real price; EVAL = unpriced pick whose
-        # game is nevertheless finished (all postseason picks, plus REG 2015-18
-        # and 2026).  Both have a real W/L outcome, so both count for
-        # model-skill win rate; only SETTLED-at-a-real-price counts for ROI.
-        st = sub[sub.result.isin(["W", "L", "P"])]
-        wins = int((st.result == "W").sum())
-        losses = int((st.result == "L").sum())
-        pushes = int((st.result == "P").sum())
-        ver = st[st.pricing == "VERIFIED_PRICE"]
-        asm = st[st.pricing == "ASSUMED_PRICE_PLUS100"]
-        syn = st[st.pricing == "SYNTHETIC_LINE"]
-        decided = wins + losses
-        c_row = cal[(cal.strategy_id == sid) & (cal.env == env)]
-        rows.append({
-            "strategy_id": sid, "env": env, "bets": len(sub), "settled": len(st),
-            "wins": wins, "losses": losses, "pushes": pushes,
-            "win_rate": round(100.0 * wins / decided, 2) if decided else None,
-            "pnl": round(float(st.pnl.fillna(0).sum()), 2),
-            "verified_bets": len(ver),
-            "verified_pnl": round(float(ver.pnl.fillna(0).sum()), 2),
-            "verified_stake": round(float(ver.stake.fillna(0).sum()), 2),
-            "verified_roi": (round(100.0 * float(ver.pnl.fillna(0).sum())
-                                   / float(ver.stake.fillna(0).sum()), 3)
-                             if float(ver.stake.fillna(0).sum()) else None),
-            "verified_win_rate": (round(100.0 * (ver.result == "W").sum()
-                                        / max(1, (ver.result.isin(["W", "L"])).sum()), 2)
-                                  if len(ver) else None),
-            "assumed_bets": len(asm),
-            "assumed_win_rate": (round(100.0 * (asm.result == "W").sum()
-                                       / max(1, (asm.result.isin(["W", "L"])).sum()), 2)
-                                 if len(asm) else None),
-            "skill_bets": int((sub.result.isin(["W", "L"])
-                               & (sub.pricing != "VERIFIED_PRICE")).sum()),
-            "synthetic_bets": len(syn),
-            "synthetic_roi": (round(100.0 * float(syn.pnl.fillna(0).sum())
-                                    / float(syn.stake.fillna(0).sum()), 3)
-                              if float(syn.stake.fillna(0).sum()) else None),
-            "brier": (round(float(c_row.brier.iloc[0]), 4)
-                      if len(c_row) and c_row.brier.notna().any() else None),
-            "log_loss": (round(float(c_row.log_loss.iloc[0]), 4)
-                         if len(c_row) and c_row.log_loss.notna().any() else None),
-        })
-    lb = pd.DataFrame(rows)
-    smeta = strat.set_index("strategy_id")
-    leaderboard = [{
-        "id": r.strategy_id, "username": r.strategy_id,
-        "name": sname.get(r.strategy_id, r.strategy_id),
-        "category": smeta.model.get(r.strategy_id, "?"),
-        "env": r.env, "env_label": ENV_LABEL.get(r.env, r.env),
-        "version": "v1", "model": smeta.model.get(r.strategy_id, "?"),
-        "market": smeta.market.get(r.strategy_id, "?"),
-        "total_bets": int(r.bets), "settled_bets": int(r.settled),
-        "wins": int(r.wins), "losses": int(r.losses), "pushes": int(r.pushes),
-        "win_rate": None if pd.isna(r.win_rate) else float(r.win_rate),
-        "total_pnl": float(r.pnl),
-        "verified_bets": int(r.verified_bets),
-        "verified_pnl": float(r.verified_pnl),
-        "verified_roi": None if pd.isna(r.verified_roi) else float(r.verified_roi),
-        "verified_win_rate": None if pd.isna(r.verified_win_rate) else float(r.verified_win_rate),
-        "assumed_bets": int(r.assumed_bets),
-        "skill_bets": int(r.skill_bets),
-        "assumed_win_rate": None if pd.isna(r.assumed_win_rate) else float(r.assumed_win_rate),
-        "synthetic_bets": int(r.synthetic_bets),
-        "synthetic_roi": None if pd.isna(r.synthetic_roi) else float(r.synthetic_roi),
-        "roi": None if pd.isna(r.verified_roi) else float(r.verified_roi),
-        "brier": r.brier, "log_loss": r.log_loss,
-        # bankroll is deliberately NOT published: the engine compounds
-        # quarter-Kelly stakes and produces artefacts (one totals strategy
-        # reaches 7e9 from 1e4). ROI per dollar staked is the metric.
-        "current_bankroll": None, "max_drawdown": None,
-        "status": smeta.status.get(r.strategy_id, "?"),
-        "pricing": ("verified 2019-2025 moneylines"
-                    if r.verified_bets else
-                    "NO verified prices in this environment — assumed +100 "
-                    "placeholder (model-skill metric only)"),
-    } for r in lb.itertuples()]
-    leaderboard.sort(key=lambda d: (-(d["verified_roi"] if d["verified_roi"] is not None
-                                      else -999),
-                                    -(d["win_rate"] or 0)))
+    for (sid, env), group in bets.groupby(["strategy_id", "env"]):
+        scored = group[group.result.isin(["W", "L", "P"])]
+        verified = scored[scored.verification_status == "VERIFIED_PRICE"]
+        stake = float(verified.stake.fillna(0).sum()) if len(verified) else None
+        pnl = float(verified.pnl.fillna(0).sum()) if len(verified) else None
+        decisions = int((scored.result.isin(["W", "L"])).sum())
+        wins = int((scored.result == "W").sum())
+        rows.append({"strategy_id": sid, "env": env, "total_bets": len(group),
+                     "settled_bets": int((group.status == "SETTLED").sum()),
+                     "eval_picks": int((group.status == "EVAL").sum()),
+                     "wins": wins, "losses": int((scored.result == "L").sum()),
+                     "pushes": int((scored.result == "P").sum()),
+                     "win_rate": wins / decisions if decisions else None,
+                     "total_pnl": pnl, "verified_bets": len(verified),
+                     "verified_stake": stake, "verified_roi": pnl / stake if stake else None,
+                     "metric_status": "EVALUATED" if len(scored) else "NO_DATA"})
+    return pd.DataFrame(rows)
 
-    # ---------------------------------------------------------- strategies
-    strategies = [{
-        "id": r.strategy_id, "username": r.strategy_id, "name": r.name,
-        "category": r.model, "env": r.env, "env_label": ENV_LABEL.get(r.env, r.env),
-        "version": "v1", "parent_version": None, "model": r.model,
-        "market": r.market, "hypothesis": r.hypothesis,
-        "entry_rule": r.notes or "", "status": r.status,
-        "created_at": r.created_at,
-        "pricing_note": ("settles at verified 2019-2025 moneylines where they exist"
-                         if r.env == "REG" else
-                         "NO verified market prices exist for postseason games; "
-                         "results are model-skill metrics (fair-coin proxy), not market ROI"),
-    } for r in strat.itertuples()]
 
-    # ------------------------------------------------------------- ledger
-    led = settled.sort_values(["season", "game_pk"], ascending=[False, False]).head(ledger_cap)
-    ledger = [{
-        "bet_id": r.bet_id, "strategy_id": r.strategy_id, "username": r.strategy_id,
-        "season": int(r.season), "gameday": "", "matchup": r.matchup,
-        "market": r.market, "selection": r.selection,
-        "price": ("" if pd.isna(r.market_price) else f"{r.market_price:+.0f}"),
-        "implied_prob": (None if pd.isna(r.market_price) else
-                         round(float(100.0 / abs(r.market_price))
-                               if r.market_price > 0 else
-                               float(abs(r.market_price) / (abs(r.market_price) + 100)), 4)),
-        "model_prob": None if pd.isna(r.model_prob) else round(float(r.model_prob), 4),
-        "edge": None if pd.isna(r.edge) else round(float(r.edge), 4),
-        "stake": round(float(r.stake or 0), 2), "result": r.result,
-        "actual_score": r.actual_score, "pnl": round(float(r.pnl or 0), 2),
-        "roi": (round(float(r.pnl / r.stake), 4) if r.stake else 0.0),
-        "clv": None if pd.isna(r.clv) else round(float(r.clv), 4),
-        "verification_status": _verification(r.game_pk, bool(r.synthetic)),
-    } for r in led.itertuples()]
-
-    # --------------------------------------------------- upcoming / open
-    def _up(r):
-        return {
-            "bet_id": r.bet_id, "strategy_id": r.strategy_id,
-            "username": r.strategy_id,
-            "strategy_name": sname.get(r.strategy_id, r.strategy_id),
-            "season": int(r.season), "gameday": "", "gametime": "",
-            "matchup": r.matchup, "venue": "", "market": r.market,
-            "selection": r.selection,
-            "current_price": ("" if pd.isna(r.market_price)
-                              else f"{r.market_price:+.0f}"),
-            "required_price": ("" if pd.isna(r.fair_price)
-                               else f"{r.fair_price:+.0f}"),
-            "model_prob": None if pd.isna(r.model_prob) else round(float(r.model_prob), 4),
-            "implied_prob": None,
-            "estimated_edge": None if pd.isna(r.edge) else round(float(r.edge), 4),
-            "stake": round(float(r.stake or 0), 2),
-            "decision_time": r.made_at,
-            "market_source": ("NO verified price available for this game — "
-                              "pick is tracked as PROPOSED, not traded"),
-            "status": r.status,
-            "round_code": ("" if pd.isna(r.round_code) else r.round_code),
+def _leaderboard(strategies: list[dict], metrics: pd.DataFrame) -> list[dict]:
+    metric_map = {(r.strategy_id, r.env): r for r in metrics.itertuples()} if not metrics.empty else {}
+    rows = []
+    for strategy in strategies:
+        sid, env = strategy["sid"], strategy["env"]
+        m = metric_map.get((sid, env))
+        has_verified = m is not None and int(m.verified_bets) > 0
+        total_pnl = float(m.total_pnl) if has_verified and m.total_pnl is not None else None
+        roi = float(m.verified_roi * 100) if has_verified and m.verified_roi is not None else None
+        row = {
+            "id": sid, "username": sid, "name": strategy["name"],
+            "category": strategy["model"], "env": env, "env_label": ENV_LABEL.get(env, env),
+            "version": strategy.get("version", "v1"), "model": strategy["model"],
+            "market": strategy["market"], "total_bets": int(m.total_bets) if m is not None else 0,
+            "settled_bets": int(m.settled_bets) if m is not None else 0,
+            "eval_picks": int(m.eval_picks) if m is not None else 0,
+            "wins": int(m.wins) if m is not None else 0,
+            "losses": int(m.losses) if m is not None else 0,
+            "pushes": int(m.pushes) if m is not None else 0,
+            "win_rate": float(m.win_rate * 100) if m is not None and m.win_rate is not None else None,
+            "total_pnl": round(total_pnl, 2) if total_pnl is not None else None,
+            "verified_bets": int(m.verified_bets) if m is not None else 0,
+            "verified_stake": round(float(m.verified_stake), 2) if has_verified else None,
+            "verified_pnl": round(total_pnl, 2) if total_pnl is not None else None,
+            "verified_roi": roi,
+            "roi": roi,
+            "initial_bankroll": STARTING_BANKROLL,
+            "current_bankroll": round(STARTING_BANKROLL + total_pnl, 2) if total_pnl is not None else None,
+            "max_drawdown": None,
+            "equity_curve": ([STARTING_BANKROLL, round(STARTING_BANKROLL + total_pnl, 2)]
+                             if total_pnl is not None else []),
+            "brier": None, "log_loss": None,
+            "status": strategy.get("status", "NOT_RUN"),
+            "metric_status": m.metric_status if m is not None else "NO_DATA",
+            "pricing_note": "No verified quote means EVAL/PROPOSED only; PnL and ROI remain null.",
         }
-    upcoming = [_up(r) for r in proposed.sort_values("game_pk").itertuples()]
-    open_pos = [p for p in upcoming if p["status"] == "OPEN"]
+        rows.append(row)
+    return rows
 
-    # --------------------------------------------------- research / experiments
-    q = pd.read_sql("SELECT * FROM research_questions", conn).set_index("q_id")
-    fnd = pd.read_sql("SELECT * FROM research_findings", conn)
-    exps = pd.read_sql("SELECT * FROM experiments", conn)
-    research = [{
-        "title": f"{r.q_id} — {q.question.get(r.q_id, '')}",
-        "status": r.verdict, "hypothesis": q.question.get(r.q_id, ""),
-        "sample_size": int(r.n or 0),
-        "methodology": "point-in-time features, chronological walk-forward; "
-                       "postseason kept separate from regular season",
-        "findings": (json.loads(r.stats_json) if r.stats_json else {}),
-        "conclusion": r.evidence or "",
-        "action_taken": f"verdict recorded as {r.verdict} (env={r.env})",
-        "env": r.env,
-    } for r in fnd.itertuples()]
-    research += [{
-        "title": f"{r.exp_id} — {r.name}",
-        "status": "RUN", "hypothesis": r.name, "sample_size": int(r.n or 0),
-        "methodology": "permanent model-comparison framework (Models A-E)",
-        "findings": (json.loads(r.details_json) if r.details_json else {}),
-        "conclusion": (f"n={r.n}, brier="
-                       f"{round(float(r.brier), 4) if r.brier is not None else 'n/a'}, "
-                       f"fair-coin ROI="
-                       f"{round(float(r.roi) * 100, 2) if r.roi is not None else 'n/a'}%"),
-        "action_taken": f"env={r.env} round={r.round_code or '-'}",
-        "env": r.env,
-    } for r in exps.itertuples()]
 
-    # ------------------------------------------------------------- registry
-    reg = pd.read_sql("SELECT * FROM source_registry", conn)
-    registry = [{
-        "name": r.source_id, "url": r.url, "provenance": r.notes or "",
-        "data_type": r.coverage or "", "description": r.description or "",
-        "cost_classification": "free / public",
-        "reliability_rating": ("verified in use" if r.verified
-                               else "rejected or unreachable"),
-        "historical_depth": r.coverage or "",
-        "last_verification_date": (r.fetched_at or "")[:10],
-        "status": ("VERIFIED_PRIMARY" if r.verified else "REJECTED_OR_UNAVAILABLE"),
-        "reject_reason": r.reject_reason or "",
-    } for r in reg.itertuples()]
+def _ledger(cap: int) -> list[dict[str, Any]]:
+    bets = _db_frame("SELECT * FROM bets ORDER BY bet_id DESC")
+    if bets.empty:
+        return []
+    out = []
+    for r in bets.head(cap).itertuples():
+        out.append({k: getattr(r, k) for k in bets.columns})
+    return out
 
-    # ---------------------------------------------------- checks / issues
-    chk = pd.read_sql("SELECT * FROM verification_log", conn)
-    audit = [{"name": r.check_id, "category": r.scope, "passed": bool(r.passed),
-              "details": r.details} for r in chk.itertuples()]
 
-    irregularities = [
-        {"id": "IRR-001", "title": "Fabricated competition data was being published",
-         "category": "DATA INTEGRITY", "severity": "CRITICAL",
-         "description": "data/*.json was generated by scripts/generate_mlbcomp_data.py "
-                        "using random.uniform/random.choice for odds, model "
-                        "probabilities, results, 'actual scores' and Kalshi "
-                        "fills/liquidity, then stamped VERIFIED_PRIMARY. The "
-                        "summary totals did not even match the files (89,452 bets "
-                        "claimed vs 1,200 present).",
-         "resolution": "Generator retired; data/*.json is now written only by "
-                       "mlbcomp/web/export_static.py from data/mlbcomp.db."},
-        {"id": "IRR-002", "title": "World Series champion table was wrong in 5 of 11 seasons",
-         "category": "VERIFICATION", "severity": "CRITICAL",
-         "description": "KNOWN_WS_CHAMPIONS listed 2016 LAD, 2020 TB, 2021 HOU, "
-                        "2023 LAD, 2024 NYY. The documented champions are 2016 CHC, "
-                        "2020 LAD, 2021 ATL, 2023 TEX, 2024 LAD. That error caused "
-                        "authentic mirror postseason data to be quarantined as "
-                        "'fabricated' and replaced by hand-written winners.",
-         "resolution": "Table corrected and cross-checked against four independent "
-                       "public listings; verify/checks.py now fails on mismatch."},
-        {"id": "IRR-003", "title": "Retired reconstruction contained invented series results",
-         "category": "DATA INTEGRITY", "severity": "CRITICAL",
-         "description": "data_recon/po_results.py asserted e.g. Rays over Dodgers "
-                        "2020, Astros over Braves 2021, Dodgers sweeping the Rangers "
-                        "in 2023 (Los Angeles was not in that Series), Yankees over "
-                        "Dodgers 2024, Cardinals over Nationals in the 2019 NLCS.",
-         "resolution": "Module retired; postseason now comes from the mirror with "
-                       "real scores (440 games, 2015-2025)."},
-        {"id": "IRR-004", "title": "2020 Division Series treated as best-of-three",
-         "category": "MODEL LOGIC", "severity": "HIGH",
-         "description": "round_needed/_need returned 2 wins for the 2020 DS. MLB's "
-                        "2020-07-23 announcement and the data itself (a 5-game "
-                        "2020 ALDS) show it was best-of-five. This corrupted "
-                        "clinch/elimination series-state features.",
-         "resolution": "Fixed in ingest.baseballr.round_needed, verify.checks._need "
-                       "and engine.backtest._need; 2015 single-game wild card fixed "
-                       "in the backtest copy too."},
-        {"id": "IRR-005", "title": "No verified market prices exist for any postseason game",
-         "category": "MARKET DATA", "severity": "MEDIUM",
-         "description": "The odds source covers the 2019-2025 regular season only. "
-                        "Postseason ROI therefore cannot be measured against a real "
-                        "market in this environment.",
-         "resolution": "Postseason results are reported as fair-coin proxy skill "
-                       "metrics and labeled NO_MARKET_PRICE in the ledger."},
-        {"id": "IRR-006", "title": "Kalshi unreachable from this environment",
-         "category": "MARKET DATA", "severity": "MEDIUM",
-         "description": "api.elections.kalshi.com cannot be reached, so no real "
-                        "contracts, quotes, volume, liquidity or fills are available.",
-         "resolution": "kalshi_trades.json is exported as an empty list rather than "
-                       "simulated fills."},
-        {"id": "IRR-007", "title": "2022 WS Game 3 carried as a scoreless Final row",
-         "category": "SOURCE QUIRK", "severity": "LOW",
-         "description": "The rain-suspended 2022 World Series Game 3 appears as a "
-                        "separate Final row with null scores.",
-         "resolution": "Rows without scores are never settled; the 2022 WS game log "
-                       "was cross-checked (PHI 7-0 HOU on Nov 1 is that game's "
-                       "completion) and the series still resolves HOU 4-2."},
-    ]
+def _upcoming() -> list[dict[str, Any]]:
+    predictions = _db_frame("SELECT * FROM predictions ORDER BY decision_time, prediction_id")
+    if predictions.empty:
+        return []
+    # Predictions are not automatically made bets.  Preserve the distinction.
+    games = _db_frame("SELECT game_pk,game_date,start_utc,home_team_id,away_team_id,round_code FROM games")
+    game_map = {int(r.game_pk): r for r in games.itertuples()} if not games.empty else {}
+    return [{"prediction_id": r.prediction_id, "strategy_version_id": r.strategy_version_id,
+             "game_pk": int(r.game_pk), "round_code": r.round_code,
+             "decision_time": r.decision_time, "selection": r.selection,
+             "model_probability": r.model_probability, "fair_price": r.fair_price,
+             "required_price": r.required_price, "edge": r.edge,
+             "status": "PROPOSED", "market_price": None,
+             "verification_status": "NO_MARKET_PRICE",
+             "game_available": int(r.game_pk) in game_map}
+            for r in predictions.itertuples()]
 
-    # ------------------------------------------------------------- summary
-    env_rows = {}
-    for env, sub in lb.groupby("env"):
-        env_rows[env] = {
-            "strategies": int(sub.strategy_id.nunique()),
-            "bets": int(sub.bets.sum()),
-            "settled": int(sub.settled.sum()),
-            "verified_bets": int(sub.verified_bets.sum()),
-            "verified_pnl": round(float(sub.verified_pnl.sum()), 2),
-            "assumed_bets": int(sub.assumed_bets.sum()),
-            "synthetic_bets": int(sub.synthetic_bets.sum()),
-            "pnl": round(float(sub.pnl.sum()), 2),
-            "market": ("verified real prices for the 2019-2025 REG subset "
-                       "(cesar-dx moneylines); all other games settled at an "
-                       "assumed +100 placeholder"
-                       if int(sub.verified_bets.sum()) else
-                       "NO verified prices exist — every bet settled at an "
-                       "assumed +100 placeholder (model-skill metric only)"),
+
+def _research() -> list[dict[str, Any]]:
+    findings = _db_frame("SELECT * FROM research_findings ORDER BY q_id")
+    experiments = _db_frame("SELECT * FROM experiments ORDER BY exp_id")
+    output = []
+    if not findings.empty:
+        for r in findings.itertuples():
+            try:
+                values = json.loads(r.stats_json) if r.stats_json else {}
+            except (TypeError, json.JSONDecodeError):
+                values = {}
+            output.append({"id": r.q_id, "title": r.q_id, "status": r.verdict,
+                           "sample_size": int(r.n or 0), "findings": values,
+                           "conclusion": r.evidence, "env": r.env,
+                           "round_code": r.round_code, "provenance": r.provenance})
+    if not experiments.empty:
+        for r in experiments.itertuples():
+            try:
+                details = json.loads(r.details_json) if r.details_json else {}
+            except (TypeError, json.JSONDecodeError):
+                details = {}
+            output.append({"id": r.exp_id, "title": r.name, "status": r.status,
+                           "sample_size": int(r.n or 0), "findings": details,
+                           "brier": r.brier, "log_loss": r.logloss, "roi": r.roi,
+                           "env": r.env, "round_code": r.round_code,
+                           "conclusion": "Comparison is not a superiority claim; preserve all models.",
+                           "provenance": "experiments table"})
+    return output
+
+
+def _audit() -> list[dict[str, Any]]:
+    checks = _db_frame("SELECT check_id,scope,passed,details FROM verification_log ORDER BY check_id")
+    return [{"name": r.check_id, "category": r.scope, "passed": bool(r.passed), "details": r.details}
+            for r in checks.itertuples()] if not checks.empty else []
+
+
+def _issues() -> list[dict[str, Any]]:
+    issues = _db_frame("SELECT * FROM data_issues ORDER BY detected_at DESC")
+    if issues.empty:
+        return [{"id": "ISSUE-QUEUE-EMPTY", "title": "No issues recorded", "severity": "INFO",
+                 "status": "OPEN", "description": "The queue is ready; no source snapshot has been loaded.",
+                 "resolution": None}]
+    return [{"id": r.issue_id, "title": r.issue_type, "severity": r.severity,
+             "status": r.status, "description": r.description, "resolution": r.resolved_at}
+            for r in issues.itertuples()]
+
+
+def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
+    db.init_db()
+    strategies = _strategy_records()
+    metrics = _metrics()
+    if not metrics.empty:
+        metric_keys = {(r.strategy_id, r.env) for r in metrics.itertuples() if int(r.total_bets) > 0}
+        for strategy in strategies:
+            if (strategy["sid"], strategy["env"]) in metric_keys and strategy.get("status") == "NOT_RUN":
+                strategy["status"] = "BACKTESTED"
+    leaderboard = _leaderboard(strategies, metrics)
+    games = _db_frame("SELECT * FROM games")
+    bets = _db_frame("SELECT * FROM bets")
+    verified_bets = bets[bets.verification_status == "VERIFIED_PRICE"] if not bets.empty else bets
+    real_pnl = float(verified_bets.pnl.fillna(0).sum()) if not verified_bets.empty else None
+    env_breakdown = {}
+    for env in ["REG", "POST", *ROUNDS]:
+        subset = metrics[metrics.env == env] if not metrics.empty else pd.DataFrame()
+        env_breakdown[env] = {
+            "strategies": int(sum(s["env"] == env for s in strategies)),
+            "records": int(subset.total_bets.sum()) if not subset.empty else 0,
+            "settled": int(subset.settled_bets.sum()) if not subset.empty else 0,
+            "evaluation_picks": int(subset.eval_picks.sum()) if not subset.empty else 0,
+            "verified_bets": int(subset.verified_bets.sum()) if not subset.empty else 0,
+            "verified_pnl": (round(float(subset.total_pnl.sum()), 2)
+                             if not subset.empty and subset.verified_bets.sum() > 0 else None),
+            "status": ("NO_DATA" if subset.empty else
+                       "NO_VERIFIED_MARKET_PRICE" if subset.verified_bets.sum() == 0 else "EVALUATED"),
         }
-    ver_settled = settled[settled.is_verified]
-    total_settled_pnl = round(float(ver_settled.pnl.fillna(0).sum()), 2)
-    top = max((d for d in leaderboard if d["verified_roi"] is not None),
-              key=lambda d: d["verified_roi"], default=None)
+    # A fetch manifest alone is not a usable model snapshot; normalized games
+    # must pass ingest before the site leaves its safe empty mode.
+    source_snapshot = bool((FEAT / "games.parquet").exists())
     summary = {
-        "competition_name": "ARENA AI — MLB Autonomous Betting Research & Testing",
-        "as_of_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "generated_by": "mlbcomp.web.export_static (source: data/mlbcomp.db)",
+        "competition_name": "ARENA AI — MLB Autonomous MLB Research & Paper Competition",
+        "as_of_date": TODAY,
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_by": "mlbcomp.web.export_static",
+        "data_mode": "SOURCE_SNAPSHOT" if source_snapshot else "NO_SOURCE_SNAPSHOT",
         "current_season": 2026,
-        "current_stage": "2026 regular season in progress (snapshot 2026-09-19)",
-        "total_games_tracked": int(pd.read_sql("SELECT COUNT(*) c FROM games", conn).c[0]),
-        "completed_games": int(pd.read_sql(
-            "SELECT COUNT(*) c FROM games WHERE home_score IS NOT NULL", conn).c[0]),
-        "upcoming_games": int(pd.read_sql(
-            "SELECT COUNT(*) c FROM games WHERE home_score IS NULL", conn).c[0]),
-        "total_strategies": int(len(strategies)),
-        "total_simulated_bets": int(len(bets)),
-        "settled_bets": int(len(settled)),
-        "total_simulated_pnl": total_settled_pnl,
-        "pnl_basis": f"settled PnL at VERIFIED prices only "
-                     f"({len(ver_settled):,} of {len(settled):,} settled bets); "
-                     f"assumed-price and synthetic-line PnL is excluded",
-        "total_upcoming_bets": len(upcoming),
-        "total_open_positions": len(open_pos),
-        "total_kalshi_trades": 0,
-        "kalshi_status": "DATA_UNAVAILABLE — api.elections.kalshi.com unreachable; "
-                         "no fills are simulated",
-        "ledger_records_exported": len(ledger),
-        "ledger_records_in_db": len(settled),
-        "ledger_note": (f"ledger capped at the {ledger_cap:,} most recent settled "
-                        f"bets; {len(settled):,} exist in the database"),
-        "top_performing_strategy": (top or {}).get("id", "n/a"),
-        "top_pnl": (top or {}).get("total_pnl", 0.0),
-        "top_roi": (top or {}).get("verified_roi") or 0.0,
-        "top_roi_basis": "ROI per dollar staked at verified 2019-2025 "
-                         "moneyline prices (the only real market in this system)",
-        "environment_breakdown": env_rows,
-        "pnl_warning": "The engine compounds quarter-Kelly stakes and settles "
-                       "unpriced games at an assumed +100 placeholder plus a "
-                       "synthetic 8.5 totals line. Compounded bankroll is "
-                       "therefore not published; ROI per dollar staked at "
-                       "verified prices is the only market claim made here.",
+        "current_stage": "No source snapshot loaded — no upcoming wager is asserted" if not source_snapshot else "Source snapshot loaded; live availability requires a fresh run",
+        "total_games_tracked": int(len(games)), "completed_games": int(games.home_score.notna().sum()) if not games.empty else 0,
+        "upcoming_games": int(games.home_score.isna().sum()) if not games.empty else 0,
+        "total_strategies": len(strategies), "total_simulated_bets": len(bets),
+        "settled_bets": int((bets.status == "SETTLED").sum()) if not bets.empty else 0,
+        "total_simulated_pnl": round(real_pnl, 2) if real_pnl is not None else None,
+        "pnl_basis": "Verified observed quotes only; no price means no stake, PnL or ROI.",
+        "total_upcoming_bets": len(_upcoming()), "total_open_positions": int(_db_frame("SELECT * FROM positions WHERE state='OPEN'").shape[0]),
+        "total_kalshi_trades": int(_db_frame("SELECT * FROM immutable_ledger WHERE market='PREDICTION_MARKET'").shape[0]),
+        "kalshi_status": "OPTIONAL — no contracts, quotes, fills or liquidity are created without verified API observations",
+        "ledger_records_exported": len(_ledger(ledger_cap)), "ledger_records_in_db": len(bets),
+        "ledger_note": "The immutable ledger is append-only; the static export may be capped for page size.",
+        "top_performing_strategy": None, "top_pnl": None, "top_roi": None,
+        "environment_breakdown": env_breakdown,
+        "limitations": [
+            "This checkout contains no fetched source snapshot unless data/raw or data/features is populated.",
+            "Historical odds without an observed decision-time timestamp are not eligible for paper PnL.",
+            "Postseason has distinct REG/POST/WC/DS/LCS/WS models and leaderboards; a small sample does not establish an edge.",
+            "No real-money order connector exists; all positions are paper-only.",
+        ],
     }
-
-    print("[export] writing data/*.json")
-    for name, obj in [("summary.json", summary), ("leaderboard.json", leaderboard),
-                      ("strategies.json", strategies), ("bets_ledger.json", ledger),
-                      ("upcoming_bets.json", upcoming),
-                      ("open_positions.json", open_pos),
-                      ("research_experiments.json", research),
-                      ("registry.json", registry), ("audit_checks.json", audit),
-                      ("irregularities.json", irregularities),
-                      ("kalshi_trades.json", [])]:
-        _write(name, obj)
-    conn.close()
+    _write("summary.json", summary)
+    _write("leaderboard.json", leaderboard)
+    _write("strategies.json", strategies)
+    _write("bets_ledger.json", _ledger(ledger_cap))
+    _write("upcoming_bets.json", _upcoming())
+    _write("open_positions.json", [dict(r) for r in _db_frame("SELECT * FROM positions WHERE state='OPEN'").to_dict(orient="records")])
+    _write("research_experiments.json", _research())
+    _write("registry.json", registry_snapshot())
+    _write("audit_checks.json", _audit())
+    kalshi = _db_frame("SELECT * FROM immutable_ledger WHERE market='PREDICTION_MARKET' ORDER BY ledger_id DESC")
+    kalshi_rows = kalshi.to_dict(orient="records") if not kalshi.empty else []
+    _write("irregularities.json", _issues())
+    _write("kalshi_trades.json", kalshi_rows)
     return summary
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ledger-cap", type=int, default=LEDGER_CAP_DEFAULT)
-    s = export(ap.parse_args().ledger_cap)
-    print(f"[export] done — {s['total_simulated_bets']:,} bets, "
-          f"{s['total_strategies']} strategies, {s['settled_bets']:,} settled")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ledger-cap", type=int, default=LEDGER_CAP_DEFAULT)
+    args = parser.parse_args()
+    result = export(args.ledger_cap)
+    print(json.dumps({"data_mode": result["data_mode"], "strategies": result["total_strategies"],
+                      "bets": result["total_simulated_bets"]}, indent=2))

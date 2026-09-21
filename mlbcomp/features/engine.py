@@ -141,9 +141,14 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
                      odds: pd.DataFrame | None = None) -> pd.DataFrame:
     """Chronological feature computation for every game (point-in-time)."""
     rates = game_event_rates(events, games)
-    elo = EloTracker()
-    state = TeamState(window=30)
-    state_sep = TeamState(window=15)   # late-season form (September)
+    # REG and POST trackers are intentionally separate.  Postseason models can
+    # inherit the regular-season prior, while postseason outcomes never leak
+    # back into a later regular-season feature.
+    elo_reg = EloTracker()
+    elo_post = EloTracker()
+    state_reg = TeamState(window=30)
+    state_post = TeamState(window=30)
+    state_sep = TeamState(window=15)   # late-season form (September REG only)
 
     odds_map = {}
     if odds is not None and len(odds):
@@ -153,24 +158,40 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
     rows = []
     for g in games.itertuples():
         f = {"game_pk": g.game_pk}
+        game_date = getattr(g, "date", pd.to_datetime(getattr(g, "game_date"), errors="coerce"))
+        is_post = pd.notna(getattr(g, "round_code", np.nan))
         if g.home_team_id is not None:
             h, a = int(g.home_team_id), int(g.away_team_id)
-            fh = state.features(h, g.season)
-            fa = state.features(a, g.season)
+            # Regular-season features are the prior for every postseason game.
+            fh = state_reg.features(h, g.season)
+            fa = state_reg.features(a, g.season)
             f.update({f"h_{k}": v for k, v in fh.items()})
             f.update({f"a_{k}": v for k, v in fa.items()})
-            f["p_elo"] = elo.predict(h, a)
-            # late-season (September, window 15) form
+            f["p_elo"] = elo_reg.predict(h, a)
+            if is_post:
+                # Copy the pre-game REG rating into the PO tracker the first
+                # time a team appears; only earlier PO games then update it.
+                elo_post.ratings.setdefault(h, elo_reg.get(h))
+                elo_post.ratings.setdefault(a, elo_reg.get(a))
+                f["p_post_elo"] = elo_post.predict(h, a)
+                ph = state_post.features(h, g.season)
+                pa = state_post.features(a, g.season)
+                f.update({f"h_post_{k}": v for k, v in ph.items()})
+                f.update({f"a_post_{k}": v for k, v in pa.items()})
+            else:
+                f["p_post_elo"] = np.nan
+            # late-season form uses only regular-season games in September.
             sh = state_sep.features(h, g.season)
             sa = state_sep.features(a, g.season)
             f["h_sep_rd"] = sh["run_diff_pg"] if sh["n_games"] else np.nan
             f["a_sep_rd"] = sa["run_diff_pg"] if sa["n_games"] else np.nan
-            # rest
-            rh = state.rest_days(h, g.date)
-            ra_ = state.rest_days(a, g.date)
-            f["rest_home"] = rh
-            f["rest_away"] = ra_
-        # market odds (if this game has verified odds)
+            # For a postseason game, the most recent earlier PO game wins the
+            # rest calculation; otherwise use regular-season history.
+            rh = state_post.rest_days(h, game_date) if is_post else None
+            ra_ = state_post.rest_days(a, game_date) if is_post else None
+            f["rest_home"] = rh if rh is not None else state_reg.rest_days(h, game_date)
+            f["rest_away"] = ra_ if ra_ is not None else state_reg.rest_days(a, game_date)
+        # Market odds (if this game has verified, timestamped quote metadata).
         o = odds_map.get(g.game_pk)
         if o is not None:
             f["home_odds"] = o.home_odds
@@ -179,16 +200,34 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
             f["o_away_last5_xwoba"] = getattr(o, "away_last5_o_xwoba", np.nan)
             f["o_home_win_pct"] = getattr(o, "home_win_pct_to_date", np.nan)
             f["o_away_win_pct"] = getattr(o, "away_win_pct_to_date", np.nan)
+            f["market_quote_observed_at"] = getattr(o, "observed_at", None)
+            f["market_quote_available_at"] = getattr(o, "available_at", None)
+            f["market_quote_source_id"] = getattr(o, "source_id", None)
+            f["market_quote_source_url"] = getattr(o, "source_url", None)
+            f["market_quote_source_observation_id"] = getattr(o, "source_observation_id", None)
+            f["market_quote_closing"] = bool(getattr(o, "closing_flag", False))
+            f["market_quote_verified"] = (
+                str(getattr(o, "verification_status", "")) == "VERIFIED"
+                and bool(f["market_quote_observed_at"])
+                and bool(f["market_quote_available_at"])
+            )
+        else:
+            f["market_quote_verified"] = False
         rows.append(f)
 
         if g.completed and g.home_team_id is not None:
             h, a = int(g.home_team_id), int(g.away_team_id)
-            elo.update(h, a, g.home_score, g.away_score)
-            state.record(h, g.home_score, g.away_score, g.date, g.venue_name, g.season)
-            state.record(a, g.away_score, g.home_score, g.date, g.venue_name, g.season)
-            if g.date.month == 9:
-                state_sep.record(h, g.home_score, g.away_score, g.date, g.venue_name, g.season)
-                state_sep.record(a, g.away_score, g.home_score, g.date, g.venue_name, g.season)
+            if is_post:
+                elo_post.update(h, a, g.home_score, g.away_score)
+                state_post.record(h, g.home_score, g.away_score, game_date, g.venue_name, g.season)
+                state_post.record(a, g.away_score, g.home_score, game_date, g.venue_name, g.season)
+            else:
+                elo_reg.update(h, a, g.home_score, g.away_score)
+                state_reg.record(h, g.home_score, g.away_score, game_date, g.venue_name, g.season)
+                state_reg.record(a, g.away_score, g.home_score, game_date, g.venue_name, g.season)
+                if game_date.month == 9:
+                    state_sep.record(h, g.home_score, g.away_score, game_date, g.venue_name, g.season)
+                    state_sep.record(a, g.away_score, g.home_score, game_date, g.venue_name, g.season)
 
     out = pd.DataFrame(rows).set_index("game_pk")
 

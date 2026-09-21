@@ -1,98 +1,110 @@
 [
   {
-    "name": "dup_game_pk",
+    "name": "game_pk_unique",
     "category": "games",
     "passed": true,
-    "details": "duplicate game_pks=0"
+    "details": "no source-backed game snapshot loaded; gate is ready"
   },
   {
-    "name": "score_validity",
-    "category": "games",
+    "name": "issue_queue_available",
+    "category": "data_quality",
     "passed": true,
-    "details": "completed=27957, negative scores=0, max home=29, max away=28"
+    "details": "data_issues table present; open/recorded issues=0"
   },
   {
-    "name": "winner_consistency",
-    "category": "games",
+    "name": "ledger_append_only_triggers",
+    "category": "immutable_ledger",
     "passed": true,
-    "details": "winner vs score inconsistencies=0"
+    "details": "append-only triggers present=True"
   },
   {
-    "name": "no_0_0",
-    "category": "games",
+    "name": "ledger_hash_chain",
+    "category": "immutable_ledger",
     "passed": true,
-    "details": "completed 0-0 games=0"
+    "details": "ledger rows=0, invalid hashes=[]"
   },
   {
-    "name": "one_game_per_team_day",
-    "category": "games",
+    "name": "no_live_execution_connector",
+    "category": "safety",
     "passed": true,
-    "details": "same-day-same-opponent pairs sharing a game_pk=0; doubleheader games=828 (legitimate, distinct pks)"
+    "details": "forbidden order-placement symbols found in=[]; paper ledger APIs only"
   },
   {
-    "name": "odds_winner_match",
-    "category": "odds x games",
+    "name": "no_settlement_without_result",
+    "category": "settlements",
     "passed": true,
-    "details": "matched=14590, winner agreement=14590 (100.00%)"
+    "details": "settled compatibility rows without W/L/P/V=0"
   },
   {
-    "name": "odds_join_match",
-    "category": "odds x games",
+    "name": "no_unverified_pnl",
+    "category": "ledger",
     "passed": true,
-    "details": "all 15442 odds rows matched game_pk with identical date+teams (after WSH->WAS, OAK->ATH rename crosswalk)"
+    "details": "unverified bet rows with non-zero PnL=0; forward rows missing observed price/source IDs=0"
   },
   {
-    "name": "ws_champions_verified",
+    "name": "postseason_round_codes",
     "category": "postseason",
     "passed": true,
-    "details": "mirror WS champions match the independently documented list for all 11 seasons 2015-2025 (2015:KC, 2016:CHC, 2017:HOU, 2018:BOS, 2019:WAS, 2020:LAD, 2021:ATL, 2022:HOU, 2023:TEX, 2024:LAD, 2025:LAD)"
+    "details": "invalid round codes=0; valid=['WC', 'DS', 'LCS', 'WS']; regular rows may have NULL"
   },
   {
-    "name": "mirror_po_structural_integrity",
-    "category": "postseason",
+    "name": "prediction_cutoff_present",
+    "category": "predictions",
     "passed": true,
-    "details": "440 mirror PO games 2015-2026; best-of-N length violations=0 (); play-after-clinch series=0 (); 0 PO rows marked Final with no score are left unsettled (e.g. the rain-suspended 2022 WS Game 3, which the mirror carries as a separate scoreless row \u2014 cross-checked against the 2022 WS game log: PHI 7-0 HOU on Nov 1 is Game 3's completion)."
+    "details": "predictions=0, missing data_cutoff_time=0"
   },
   {
-    "name": "series_format_verified",
-    "category": "postseason",
+    "name": "quote_availability_gate",
+    "category": "markets",
     "passed": true,
-    "details": "113 verified-corpus series respect best-of-N length limits (2012/2015 WC single game, 2020 WC/DS shorter)"
+    "details": "verified quotes without observed_at=0"
   },
   {
-    "name": "no_play_after_clinch_verified",
-    "category": "postseason",
+    "name": "quote_price_integrity",
+    "category": "markets",
     "passed": true,
-    "details": "no verified-corpus series contains a game after a team already had enough wins (113 series)"
+    "details": "quote rows=0, invalid American prices=0; missing prices are not quote rows"
   },
   {
-    "name": "series_state_complete",
+    "name": "schema_required_tables",
+    "category": "schema",
+    "passed": true,
+    "details": "required tables present=True; missing=[]"
+  },
+  {
+    "name": "score_integrity",
+    "category": "games",
+    "passed": true,
+    "details": "no completed game rows loaded; no score is asserted"
+  },
+  {
+    "name": "series_state_pre_game",
     "category": "series_state",
     "passed": true,
-    "details": "completed mirror po games without state=0"
+    "details": "state rows=0, invalid pre-game counters=0"
   },
   {
-    "name": "season_2020_short",
-    "category": "seasons",
+    "name": "source_registry_fields",
+    "category": "sources",
     "passed": true,
-    "details": "2020 max home games per team=30 (pandemic 82-game season)"
+    "details": "registry rows=15, required metadata columns=['access_method', 'automation_capability', 'cost', 'current_availability', 'data_type', 'granularity', 'historical_depth', 'licensing', 'limitations', 'name', 'reliability', 'restrictions', 'url', 'verification_date', 'verification_status']; verification_date may be null only for NOT_VERIFIED discovery records"
   },
   {
-    "name": "pbp_coverage",
-    "category": "pbp",
+    "name": "strategy_environment_isolation",
+    "category": "strategies",
     "passed": true,
-    "details": "2015+ completed games covered by play-by-play=27957/27957"
+    "details": "strategy rows=68; invalid environments=[]"
   },
   {
-    "name": "team_count",
-    "category": "teams",
+    "name": "strategy_versions_present",
+    "category": "strategies",
     "passed": true,
-    "details": "active MLB teams=30 (expected 30)"
+    "details": "strategies=68, version rows=68; every persisted strategy has a version"
   },
   {
-    "name": "live_2026_snapshot",
-    "category": "seasons",
+    "name": "winner_integrity",
+    "category": "games",
     "passed": true,
-    "details": "2026 reg completed=2324 (last 2026-09-19), open/scheduled=106"
+    "details": "no completed game rows loaded; no winner is asserted"
   }
 ]

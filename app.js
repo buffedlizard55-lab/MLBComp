@@ -1,1060 +1,153 @@
-/**
- * MLBComp Application Controller
- * High-performance, dependency-free vanilla JavaScript SPA.
- * Manages data loading, multi-column sorting, environment filtering, category filtering,
- * tab navigation, SVG chart engines, modals, sandbox execution, and data exports.
- */
+/* MLBComp static competition client.  It renders committed JSON projections only. */
+const DATA_FILES = ['summary','leaderboard','strategies','upcoming_bets','open_positions','bets_ledger','research_experiments','registry','audit_checks','irregularities','kalshi_trades'];
+const S = {data:{}, tab:'dashboard'};
+const $ = (q, root=document) => root.querySelector(q);
+const $$ = (q, root=document) => [...root.querySelectorAll(q)];
+const h = value => String(value ?? '—').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const arr = key => Array.isArray(S.data[key]) ? S.data[key] : [];
+const summary = () => S.data.summary || {};
+const fmtN = v => v == null || v === '' ? '—' : Number(v).toLocaleString(undefined,{maximumFractionDigits:2});
+const fmtPct = v => v == null || v === '' ? '—' : `${Number(v).toFixed(2)}%`;
+const fmtMoney = v => v == null || v === '' ? '—' : `${Number(v) < 0 ? '−' : ''}$${Math.abs(Number(v)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+const valueStatus = (v, suffix='') => v == null ? '<span class="muted">No data</span>' : `${h(v)}${suffix}`;
+const unique = values => [...new Set(values.filter(v => v != null && v !== ''))].sort();
 
-// Global State
-const STATE = {
-  summary: null,
-  leaderboard: [],
-  strategies: [],
-  upcomingBets: [],
-  openPositions: [],
-  ledger: [],
-  kalshiTrades: [],
-  researchExperiments: [],
-  registry: [],
-  irregularities: [],
-  auditChecks: [],
-  currentTab: 'dashboard',
-  historyPage: 1,
-  historyPageSize: 50,
-  leaderSortField: 'total_pnl',
-  leaderSortAsc: false,
-  leaderCatFilter: 'ALL',
-  leaderEnvFilter: 'ALL',
-};
-
-// ================= INITIALIZATION =================
-document.addEventListener('DOMContentLoaded', () => {
-  initNavigation();
-  initLeaderboardControls();
-  loadAllData();
-});
-
-function initNavigation() {
-  const tabs = document.querySelectorAll('.nav-tab');
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      const target = tab.getAttribute('data-tab');
-      switchTab(target);
-    });
-  });
-
-  // Handle URL hash routing
-  if (window.location.hash) {
-    const hashTab = window.location.hash.replace('#', '');
-    if (document.getElementById(`view-${hashTab}`)) {
-      switchTab(hashTab);
-    }
-  }
-
-  window.addEventListener('hashchange', () => {
-    const hashTab = window.location.hash.replace('#', '');
-    if (hashTab && document.getElementById(`view-${hashTab}`) && hashTab !== STATE.currentTab) {
-      switchTab(hashTab);
-    }
-  });
+async function loadData() {
+  const responses = await Promise.all(DATA_FILES.map(async key => {
+    try { const r = await fetch(`data/${key}.json`, {cache:'no-store'}); return [key, r.ok ? await r.json() : []]; }
+    catch (_) { return [key, key === 'summary' ? {data_mode:'UNAVAILABLE'} : []]; }
+  }));
+  S.data = Object.fromEntries(responses);
+  renderAll();
 }
 
-function switchTab(tabId) {
-  STATE.currentTab = tabId;
-  window.location.hash = tabId;
-
-  document.querySelectorAll('.nav-tab').forEach(t => {
-    t.classList.toggle('active', t.getAttribute('data-tab') === tabId);
-  });
-
-  document.querySelectorAll('.view-section').forEach(sec => {
-    sec.classList.toggle('active', sec.id === `view-${tabId}`);
-  });
-
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-
-  // Re-render chart if switching to performance or dashboard
-  if (tabId === 'performance') {
-    renderPerformanceCharts();
-  } else if (tabId === 'dashboard') {
-    renderDashboardEquityChart();
-  }
+function initTabs() {
+  $$('.tabs button').forEach(button => button.addEventListener('click', () => go(button.dataset.tab)));
+  $$('[data-go]').forEach(button => button.addEventListener('click', () => go(button.dataset.go)));
+  const hash = location.hash.slice(1);
+  if (document.getElementById(`view-${hash}`)) go(hash, false);
+  addEventListener('hashchange', () => { const tab = location.hash.slice(1); if (document.getElementById(`view-${tab}`)) go(tab, false); });
+}
+function go(tab, updateHash=true) {
+  if (!document.getElementById(`view-${tab}`)) return;
+  S.tab = tab;
+  $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('.view').forEach(v => v.classList.toggle('active', v.id === `view-${tab}`));
+  if (updateHash) history.replaceState(null,'',`#${tab}`);
 }
 
-function initLeaderboardControls() {
-  // Sort header click listeners
-  const sortHeaders = document.querySelectorAll('#main-leaderboard-table th.sortable');
-  sortHeaders.forEach(th => {
-    th.style.cursor = 'pointer';
-    th.addEventListener('click', () => {
-      const field = th.getAttribute('data-sort');
-      if (STATE.leaderSortField === field) {
-        STATE.leaderSortAsc = !STATE.leaderSortAsc;
-      } else {
-        STATE.leaderSortField = field;
-        STATE.leaderSortAsc = false;
-      }
-      updateSortIndicators();
-      renderLeaderboard();
-    });
-  });
-
-  // Search input
-  const searchInput = document.getElementById('leader-search');
-  if (searchInput) {
-    searchInput.addEventListener('input', () => renderLeaderboard());
-  }
-
-  // Category filter
-  const catSelect = document.getElementById('leader-cat-filter');
-  if (catSelect) {
-    catSelect.addEventListener('change', (e) => {
-      STATE.leaderCatFilter = e.target.value;
-      renderLeaderboard();
-    });
-  }
-
-  // Environment filter pills
-  const envBtns = document.querySelectorAll('#leader-env-filters .env-btn');
-  envBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      envBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      STATE.leaderEnvFilter = btn.getAttribute('data-env');
-      renderLeaderboard();
-    });
-  });
-
-  // Strategy catalog search & filter
-  const stratSearch = document.getElementById('strat-search');
-  if (stratSearch) {
-    stratSearch.addEventListener('input', () => renderStrategies());
-  }
-  const stratCat = document.getElementById('strat-cat-filter');
-  if (stratCat) {
-    stratCat.addEventListener('change', () => renderStrategies());
-  }
-
-  // Upcoming filters
-  const upStatus = document.getElementById('upcoming-status-filter');
-  if (upStatus) {
-    upStatus.addEventListener('change', () => renderUpcomingBets());
-  }
-  const upMkt = document.getElementById('upcoming-market-filter');
-  if (upMkt) {
-    upMkt.addEventListener('change', () => renderUpcomingBets());
-  }
-
-  // History filters
-  const histSearch = document.getElementById('history-search');
-  if (histSearch) {
-    histSearch.addEventListener('input', () => {
-      STATE.historyPage = 1;
-      renderHistoryTable();
-    });
-  }
-  const histSeason = document.getElementById('history-season-filter');
-  if (histSeason) {
-    histSeason.addEventListener('change', () => {
-      STATE.historyPage = 1;
-      renderHistoryTable();
-    });
-  }
-  const histRes = document.getElementById('history-res-filter');
-  if (histRes) {
-    histRes.addEventListener('change', () => {
-      STATE.historyPage = 1;
-      renderHistoryTable();
-    });
-  }
+function renderAll() {
+  const m = summary();
+  const mode = m.data_mode || 'UNAVAILABLE';
+  $('#data-mode').textContent = mode.replaceAll('_',' ');
+  $('#data-mode').className = `status ${mode === 'SOURCE_SNAPSHOT' ? 'verified' : 'warning'}`;
+  $('#truth-banner').innerHTML = `<b>${h(mode.replaceAll('_',' '))}.</b> ${mode === 'SOURCE_SNAPSHOT' ? 'Only source-backed observations are displayed.' : 'No source snapshot is loaded. Strategy hypotheses and audit controls are visible; no game, price, fill, result or PnL is asserted.'} <span>Every output is paper-only.</span>`;
+  $('#hero-mode').textContent = mode.replaceAll('_',' ');
+  $('#hero-asof').textContent = `as of ${h(m.as_of_date || '—')}`;
+  $('#footer-meta').textContent = `${fmtN(m.total_strategies)} strategy versions · ${fmtN(m.total_simulated_bets)} wager records · ${h(m.as_of_date || '')}`;
+  renderDashboard(); renderFilters(); renderLeaderboard(); renderPostseason(); renderStrategies(); renderUpcoming(); renderPositions(); renderHistory(); renderAnalytics(); renderResearch(); renderSources(); renderVerification();
 }
 
-function updateSortIndicators() {
-  document.querySelectorAll('#main-leaderboard-table th.sortable').forEach(th => {
-    const field = th.getAttribute('data-sort');
-    let text = th.textContent.replace(/[ ▲▼]/g, '');
-    if (field === STATE.leaderSortField) {
-      text += STATE.leaderSortAsc ? ' ▲' : ' ▼';
-    }
-    th.textContent = text;
-  });
-}
-
-// ================= DATA LOADING =================
-async function loadAllData() {
-  try {
-    const [
-      summaryRes,
-      leaderRes,
-      stratRes,
-      upcomingRes,
-      openPosRes,
-      ledgerRes,
-      kalshiRes,
-      expRes,
-      regRes,
-      irrRes,
-      auditRes
-    ] = await Promise.all([
-      fetch('data/summary.json').then(r => r.json()),
-      fetch('data/leaderboard.json').then(r => r.json()),
-      fetch('data/strategies.json').then(r => r.json()),
-      fetch('data/upcoming_bets.json').then(r => r.json()),
-      fetch('data/open_positions.json').then(r => r.json()),
-      fetch('data/bets_ledger.json').then(r => r.json()),
-      fetch('data/kalshi_trades.json').then(r => r.json()),
-      fetch('data/research_experiments.json').then(r => r.json()),
-      fetch('data/registry.json').then(r => r.json()),
-      fetch('data/irregularities.json').then(r => r.json()),
-      fetch('data/audit_checks.json').then(r => r.json())
-    ]);
-
-    STATE.summary = summaryRes;
-    STATE.leaderboard = leaderRes;
-    STATE.strategies = stratRes;
-    STATE.upcomingBets = upcomingRes;
-    STATE.openPositions = openPosRes;
-    STATE.ledger = ledgerRes;
-    STATE.kalshiTrades = kalshiRes;
-    STATE.researchExperiments = expRes;
-    STATE.registry = regRes;
-    STATE.irregularities = irrRes;
-    STATE.auditChecks = auditRes;
-
-    renderKPIs();
-    renderDashboard();
-    renderLeaderboard();
-    renderStrategies();
-    renderUpcomingBets();
-    renderOpenPositions();
-    renderHistoryTable();
-    renderPerformanceCharts();
-    renderResearchLab();
-    renderKalshiDesk();
-    renderRegistry();
-    renderVerification();
-
-    updateSortIndicators();
-    console.log('MLBComp initialized successfully with 58 strategies.');
-  } catch (err) {
-    console.error('Failed to load competition data:', err);
-  }
-}
-
-// ================= RENDER KPIS =================
-function renderKPIs() {
-  if (!STATE.summary) return;
-  const s = STATE.summary;
-  document.getElementById('kpi-games').textContent = s.total_games_tracked.toLocaleString();
-  document.getElementById('kpi-strategies').textContent = s.total_strategies;
-  document.getElementById('kpi-bets').textContent = s.total_simulated_bets.toLocaleString();
-  
-  const pnlElem = document.getElementById('kpi-pnl');
-  const isPos = s.total_simulated_pnl >= 0;
-  pnlElem.textContent = `${isPos ? '+' : ''}$${Math.abs(s.total_simulated_pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  pnlElem.className = isPos ? 'kpi-value kpi-val-green' : 'kpi-value kpi-val-red';
-
-  document.getElementById('kpi-upcoming').textContent = s.total_upcoming_bets;
-  document.getElementById('kpi-top-strat').textContent = s.top_performing_strategy;
-  // top_roi is now usually negative (no strategy beats the verified market),
-  // so the sign must be handled rather than hard-prefixed with '+'.
-  const tRoi = Number(s.top_roi || 0), tPnl = Number(s.top_pnl || 0);
-  const roiEl = document.getElementById('kpi-top-roi');
-  roiEl.textContent = `ROI: ${tRoi >= 0 ? '+' : '\u2212'}${Math.abs(tRoi).toFixed(3)}% at verified prices ($${tPnl >= 0 ? '+' : '\u2212'}${Math.abs(tPnl).toLocaleString('en-US', { minimumFractionDigits: 2 })})`;
-  roiEl.style.color = tRoi >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
-}
-
-// ================= DASHBOARD VIEW =================
 function renderDashboard() {
-  // 1. Top 5 Leaders preview
-  const tbody = document.getElementById('dash-leader-body');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-
-  const top5 = STATE.leaderboard.slice(0, 5);
-  top5.forEach((s, idx) => {
-    const tr = document.createElement('tr');
-    tr.className = 'clickable-row';
-    tr.onclick = () => openStrategyModal(s.id);
-    const pnlClass = s.total_pnl >= 0 ? 'color: var(--accent-green);' : 'color: var(--accent-red);';
-    tr.innerHTML = `
-      <td><strong>#${idx + 1}</strong></td>
-      <td><span style="color: var(--accent-cyan); font-family: var(--font-mono); font-weight:700;">${s.username}</span></td>
-      <td><span class="tag-category">${s.category}</span></td>
-      <td>${s.win_rate}%</td>
-      <td style="${pnlClass} font-family: var(--font-mono); font-weight:700;">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-      <td><strong>${s.roi > 0 ? '+' : ''}${s.roi}%</strong></td>
-    `;
-    tbody.appendChild(tr);
-  });
-
-  // 2. Active Slate Pulse (15 games)
-  const slateBody = document.getElementById('dash-slate-body');
-  if (!slateBody) return;
-  slateBody.innerHTML = '';
-
-  const matchupMap = {};
-  STATE.upcomingBets.forEach(u => {
-    if (!matchupMap[u.matchup]) {
-      matchupMap[u.matchup] = {
-        count: 0,
-        gameday: u.gameday,
-        gametime: u.gametime,
-        venue: u.venue,
-        moneyline: null,
-        total: null
-      };
-    }
-    matchupMap[u.matchup].count += 1;
-    if (u.market === 'ML' && !matchupMap[u.matchup].moneyline) matchupMap[u.matchup].moneyline = u.selection;
-    if (u.market === 'TOTAL' && !matchupMap[u.matchup].total) matchupMap[u.matchup].total = u.selection;
-  });
-
-  const sortedMatchups = Object.entries(matchupMap).sort((a, b) => b[1].count - a[1].count);
-
-  sortedMatchups.forEach(([matchup, info]) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><strong>${matchup}</strong> <span style="font-size:0.75rem; color:var(--text-muted);">(${info.venue || 'Ballpark'})</span></td>
-      <td style="color: var(--text-secondary); font-size: 0.78rem;">${info.gametime || 'Today 13:35 EDT'}</td>
-      <td><code>${info.moneyline || 'Consensus'}</code></td>
-      <td><code>${info.total || 'Over/Under 8.0'}</code></td>
-      <td><span class="badge badge-ready">${info.count} signals</span></td>
-    `;
-    slateBody.appendChild(tr);
-  });
-
-  renderDashboardEquityChart();
+  const m = summary();
+  const cards = [
+    ['Games tracked', fmtN(m.total_games_tracked), `${fmtN(m.completed_games)} completed · ${fmtN(m.upcoming_games)} upcoming`],
+    ['Strategy library', fmtN(m.total_strategies), 'versioned hypotheses'],
+    ['Ledger records', fmtN(m.total_simulated_bets), 'append-only projection'],
+    ['Verified PnL', m.total_simulated_pnl == null ? 'No data' : fmtMoney(m.total_simulated_pnl), 'observed prices only'],
+    ['Open paper positions', fmtN(m.total_open_positions), 'no real orders'],
+    ['Source mode', (m.data_mode || '—').replaceAll('_',' '), h(m.current_stage || '')],
+  ];
+  $('#kpis').innerHTML = cards.map(c => `<div class="kpi"><span>${h(c[0])}</span><strong>${c[1]}</strong><small>${c[2]}</small></div>`).join('');
+  const audits = arr('audit_checks'); const passed = audits.filter(x => x.passed).length;
+  $('#health').innerHTML = `<div class="health-row"><strong>${passed}/${audits.length || 0}</strong><span>control checks passing</span></div><div class="health-row"><strong>${fmtN(arr('registry').length)}</strong><span>sources in registry</span></div><div class="health-row"><strong>${fmtN(arr('irregularities').length)}</strong><span>issue records</span></div><p class="muted">A passing control does not mean a data source is available.</p>`;
+  const env = m.environment_breakdown || {};
+  $('#environment-summary').innerHTML = ['REG','POST','WC','DS','LCS','WS'].map(k => { const e=env[k]||{}; return `<div class="env-row"><span><b>${h(k)}</b> ${h(k==='REG'?'Regular season':k==='POST'?'Postseason':(k==='LCS'?'LCS':k==='WS'?'World Series':k==='DS'?'Division Series':'Wild Card'))}</span><strong>${fmtN(e.verified_bets || 0)} verified</strong><small>${h(e.status || 'NO DATA')}</small></div>`; }).join('');
 }
 
-function renderDashboardEquityChart() {
-  const container = document.getElementById('dash-equity-chart');
-  if (!container || STATE.leaderboard.length === 0) return;
-
-  const topStrats = STATE.leaderboard.slice(0, 4);
-  const colors = ['#10b981', '#3b82f6', '#06b6d4', '#f59e0b'];
-  container.innerHTML = generateMultiLineChartSVG(topStrats, colors, 900, 280);
+function fillSelect(id, values, allLabel='All') {
+  const select = document.getElementById(id); if (!select) return;
+  const current = select.value || 'ALL';
+  const first = select.options[0];
+  select.innerHTML = ''; const option = document.createElement('option'); option.value='ALL'; option.textContent=allLabel; select.appendChild(option);
+  values.forEach(v => { const o=document.createElement('option'); o.value=v; o.textContent=v; select.appendChild(o); });
+  select.value = [...select.options].some(o=>o.value===current) ? current : 'ALL';
+}
+function renderFilters() {
+  const lb=arr('leaderboard'), st=arr('strategies'), up=arr('upcoming_bets'), ledger=arr('bets_ledger'), src=arr('registry');
+  ['leader-env','strategy-env','upcoming-env','history-env'].forEach(id => fillSelect(id, unique([...lb,...st,...up,...ledger].map(x=>x.env || x.environment))));
+  fillSelect('leader-market', unique(lb.map(x=>x.market))); fillSelect('strategy-market', unique(st.map(x=>x.market))); fillSelect('upcoming-round', unique(up.map(x=>x.round_code))); fillSelect('history-status', unique(ledger.map(x=>x.status || x.event_type)));
+  fillSelect('strategy-status', unique(st.map(x=>x.status))); fillSelect('source-status', unique(src.map(x=>x.verification_status || x.status)));
+  ['leader-env','leader-round','leader-market','strategy-env','strategy-status','strategy-market','upcoming-env','upcoming-round','history-env','history-status','source-status'].forEach(id => { const el=document.getElementById(id); if(el && !el.dataset.bound) { el.addEventListener('change', renderAll); el.dataset.bound='1'; }});
+  ['leader-search','strategy-search','history-search'].forEach(id => { const el=document.getElementById(id); if(el && !el.dataset.bound) { el.addEventListener('input', renderAll); el.dataset.bound='1'; }});
+}
+function selected(id) { return document.getElementById(id)?.value || 'ALL'; }
+function matches(row, envId='leader-env', roundId='leader-round', marketId='leader-market', searchId='leader-search') {
+  const env=selected(envId), round=selected(roundId), market=selected(marketId), search=(document.getElementById(searchId)?.value || '').toLowerCase();
+  return (env==='ALL'||(row.env||row.environment)===env) && (round==='ALL'||row.round_code===round) && (market==='ALL'||row.market===market) && (!search||JSON.stringify(row).toLowerCase().includes(search));
 }
 
-// ================= LEADERBOARD VIEW =================
 function renderLeaderboard() {
-  const tbody = document.getElementById('main-leaderboard-body');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-
-  const searchVal = (document.getElementById('leader-search')?.value || '').toLowerCase();
-  const catFilter = STATE.leaderCatFilter;
-  const envFilter = STATE.leaderEnvFilter;
-
-  let list = [...STATE.leaderboard];
-
-  // Category filter
-  if (catFilter !== 'ALL') {
-    list = list.filter(s => s.category === catFilter);
-  }
-
-  // Environment filter (REG, POST, WC, DS, LCS, WS)
-  if (envFilter !== 'ALL') {
-    list = list.filter(s => s.env === envFilter);
-  }
-
-  // Search filter
-  if (searchVal) {
-    list = list.filter(s =>
-      s.username.toLowerCase().includes(searchVal) ||
-      s.name.toLowerCase().includes(searchVal) ||
-      s.id.toLowerCase().includes(searchVal) ||
-      s.category.toLowerCase().includes(searchVal)
-    );
-  }
-
-  // Sort
-  list.sort((a, b) => {
-    let valA = a[STATE.leaderSortField];
-    let valB = b[STATE.leaderSortField];
-    if (typeof valA === 'string') {
-      return STATE.leaderSortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
-    }
-    return STATE.leaderSortAsc ? valA - valB : valB - valA;
-  });
-
-  list.forEach((s, idx) => {
-    const tr = document.createElement('tr');
-    tr.className = 'clickable-row';
-    tr.onclick = () => openStrategyModal(s.id);
-    const pnlClass = s.total_pnl >= 0 ? 'color: var(--accent-green);' : 'color: var(--accent-red);';
-    const envBadge = s.env === 'REG' ? 'badge-win' : (s.env === 'POST' ? 'badge-qualified' : 'badge-ready');
-    const isProxy = s.env !== 'REG' ? '<span title="Fair-Coin Proxy" style="color:var(--accent-purple); font-size:0.7rem;"> (Proxy)</span>' : '';
-
-    tr.innerHTML = `
-      <td><strong>${idx + 1}</strong></td>
-      <td>
-        <div style="font-weight:700; color:var(--accent-cyan); font-family:var(--font-mono);">${s.username}</div>
-        <div style="font-size:0.75rem; color:var(--text-secondary);">${s.name}</div>
-      </td>
-      <td><span class="tag-category">${s.category}</span></td>
-      <td><span class="badge ${envBadge}">${s.env}</span></td>
-      <td><span class="tag-version">${s.version}</span></td>
-      <td style="${pnlClass} font-family:var(--font-mono); font-weight:700;">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-      <td><strong>${s.roi > 0 ? '+' : ''}${s.roi}%</strong>${isProxy}</td>
-      <td>${s.win_rate}%</td>
-      <td style="font-family:var(--font-mono);">${s.total_bets.toLocaleString()}</td>
-      <td style="color:var(--accent-red); font-family:var(--font-mono);">$${s.max_drawdown.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-      <td style="font-family:var(--font-mono); font-weight:600;">$${s.current_bankroll.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-      <td><span class="badge ${s.status === 'ACTIVE' ? 'badge-win' : 'badge-watching'}">${s.status}</span></td>
-    `;
-    tbody.appendChild(tr);
-  });
+  const rows=arr('leaderboard').filter(r=>matches(r));
+  $('#leader-table tbody').innerHTML = rows.length ? rows.map(r => `<tr><td><button class="link-button strategy-link" data-id="${h(r.id || r.strategy_id)}">${h(r.id || r.strategy_id)}</button><small>${h(r.name || '')}</small></td><td><span class="pill env-${h(r.env)}">${h(r.env)}</span></td><td><span class="badge ${r.metric_status==='NO_DATA'?'neutral':'good'}">${h(r.metric_status || r.status || '—')}</span></td><td>${fmtN(r.total_bets)}</td><td>${fmtN(r.verified_bets)}</td><td>${r.metric_status==='NO_DATA'?'—':fmtPct(r.win_rate)}</td><td>${r.metric_status==='NO_DATA'?'—':fmtPct(r.verified_roi ?? r.roi)}</td><td>${r.metric_status==='NO_DATA'?'—':fmtMoney(r.verified_pnl ?? r.total_pnl)}</td><td><button class="text-button strategy-link" data-id="${h(r.id || r.strategy_id)}">Drill down</button></td></tr>`).join('') : `<tr><td colspan="9" class="empty-cell">No leaderboard rows match this filter.</td></tr>`;
+  $$('.strategy-link').forEach(b=>b.addEventListener('click',()=>openStrategy(b.dataset.id)));
 }
 
-// ================= STRATEGIES CATALOG =================
+function roundStats(round) { return arr('leaderboard').filter(x=>x.env===round); }
+function renderPostseason() {
+  const m=summary(), rounds=['WC','DS','LCS','WS'];
+  $('#postseason-banner').innerHTML = `<b>POST environment:</b> ${h((m.environment_breakdown?.POST?.status || 'NO DATA').replaceAll('_',' '))}. No postseason market price is invented. The transfer, adjusted, dedicated, round-specific and hierarchical experiments remain separate records.`;
+  $('#round-cards').innerHTML = rounds.map(round => { const rows=roundStats(round); const evaluated=rows.reduce((n,r)=>n+(r.eval_picks||0),0); const verified=rows.reduce((n,r)=>n+(r.verified_bets||0),0); return `<article class="round-card"><div class="round-code">${h(round)}</div><h3>${h({WC:'Wild Card',DS:'Division Series',LCS:'League Championship Series',WS:'World Series'}[round])}</h3><div class="round-number">${fmtN(evaluated)} <small>evaluation picks</small></div><div class="round-detail">${fmtN(verified)} verified price wagers<br>${rows.length} strategy versions</div><button class="text-button" data-round-filter="${round}">Filter leaderboard →</button></article>`; }).join('');
+  $$('[data-round-filter]').forEach(b=>b.addEventListener('click',()=>{go('leaderboard'); const e=document.getElementById('leader-round'); if(e){e.value=b.dataset.round; renderLeaderboard();}}));
+  const exps=arr('research_experiments').filter(x=>String(x.id||'').startsWith('EXP_'));
+  $('#model-comparison').innerHTML = exps.length ? `<div class="comparison-grid">${exps.map(x=>`<div class="comparison"><b>${h(x.id)}</b><span>${h(x.title)}</span><strong>${h(x.status || '—')}</strong><small>n=${fmtN(x.sample_size)} · Brier=${x.brier==null?'—':Number(x.brier).toFixed(4)} · verified ROI=${x.roi==null?'—':fmtPct(Number(x.roi)*100)}</small></div>`).join('')}</div>` : '<div class="empty">No A–E experiment has run on a source snapshot.</div>';
+}
+
 function renderStrategies() {
-  const grid = document.getElementById('strategies-card-grid');
-  if (!grid) return;
-  grid.innerHTML = '';
-
-  const searchVal = (document.getElementById('strat-search')?.value || '').toLowerCase();
-  const catFilter = document.getElementById('strat-cat-filter')?.value || 'ALL';
-
-  let list = [...STATE.strategies];
-
-  if (catFilter !== 'ALL') {
-    list = list.filter(s => s.category === catFilter);
-  }
-
-  if (searchVal) {
-    list = list.filter(s =>
-      s.username.toLowerCase().includes(searchVal) ||
-      s.name.toLowerCase().includes(searchVal) ||
-      s.hypothesis.toLowerCase().includes(searchVal)
-    );
-  }
-
-  const perfMap = {};
-  STATE.leaderboard.forEach(p => { perfMap[p.id] = p; });
-
-  list.forEach(strat => {
-    const perf = perfMap[strat.id] || { total_pnl: 0, roi: 0, win_rate: 0, total_bets: 0, max_drawdown: 0 };
-    const card = document.createElement('div');
-    card.className = 'strategy-card';
-    const pnlClass = perf.total_pnl >= 0 ? 'color: var(--accent-green);' : 'color: var(--accent-red);';
-    card.innerHTML = `
-      <div>
-        <div class="strat-card-header">
-          <span class="strat-username">${strat.username}</span>
-          <div>
-            <span class="badge badge-ready" style="font-size:0.7rem; margin-right:4px;">${strat.env}</span>
-            <span class="tag-version">${strat.version}</span>
-          </div>
-        </div>
-        <div class="strat-name">${strat.name}</div>
-        <div style="margin-bottom: 8px;"><span class="tag-category">${strat.category}</span></div>
-        <p class="strat-hypothesis">${strat.hypothesis.substring(0, 180)}...</p>
-      </div>
-
-      <div>
-        <div class="strat-metrics-row">
-          <div class="strat-metric-box">
-            <span class="strat-metric-lbl">Total PnL</span>
-            <span class="strat-metric-val" style="${pnlClass}">${perf.total_pnl >= 0 ? '+' : ''}$${perf.total_pnl.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
-          </div>
-          <div class="strat-metric-box">
-            <span class="strat-metric-lbl">ROI</span>
-            <span class="strat-metric-val">${perf.roi > 0 ? '+' : ''}${perf.roi}%</span>
-          </div>
-          <div class="strat-metric-box">
-            <span class="strat-metric-lbl">Win Rate</span>
-            <span class="strat-metric-val">${perf.win_rate}%</span>
-          </div>
-          <div class="strat-metric-box">
-            <span class="strat-metric-lbl">Bets</span>
-            <span class="strat-metric-val">${perf.total_bets}</span>
-          </div>
-        </div>
-
-        <button class="btn btn-sm" style="width:100%; justify-content:center;" onclick="openStrategyModal('${strat.id}')">Explore Full Methodology & Lineage →</button>
-      </div>
-    `;
-    grid.appendChild(card);
-  });
+  const env=selected('strategy-env'), status=selected('strategy-status'), market=selected('strategy-market'), q=(document.getElementById('strategy-search')?.value||'').toLowerCase();
+  const rows=arr('strategies').filter(s=>(env==='ALL'||s.env===env)&&(status==='ALL'||s.status===status)&&(market==='ALL'||s.market===market)&&(!q||JSON.stringify(s).toLowerCase().includes(q)));
+  $('#strategy-cards').innerHTML=rows.length?rows.map(s=>`<article class="strategy-card"><div class="strategy-top"><span class="pill env-${h(s.env)}">${h(s.env)}</span><span class="badge ${s.status==='DATA_UNAVAILABLE'?'warning':'neutral'}">${h(s.status||'NOT_RUN')}</span></div><h3>${h(s.id)}</h3><h4>${h(s.name)}</h4><p>${h(s.hypothesis)}</p><dl><dt>Market</dt><dd>${h(s.market)}</dd><dt>Data gate</dt><dd>${h((s.data_requirements||[]).join(', ')||'—')}</dd><dt>Version</dt><dd>${h(s.version||'v1')}</dd></dl><button class="button secondary strategy-link" data-id="${h(s.id)}">Open strategy →</button></article>`).join(''):'<div class="empty">No strategy matches this filter.</div>';
+  $$('.strategy-link').forEach(b=>b.addEventListener('click',()=>openStrategy(b.dataset.id)));
 }
 
-// ================= UPCOMING BETS =================
-function renderUpcomingBets() {
-  const tbody = document.getElementById('upcoming-bets-body');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-
-  const statusFilter = document.getElementById('upcoming-status-filter')?.value || 'ALL';
-  const marketFilter = document.getElementById('upcoming-market-filter')?.value || 'ALL';
-
-  let list = [...STATE.upcomingBets];
-
-  if (statusFilter !== 'ALL') {
-    list = list.filter(u => u.status === statusFilter);
-  }
-
-  if (marketFilter !== 'ALL') {
-    list = list.filter(u => u.market === marketFilter);
-  }
-
-  list.forEach(bet => {
-    const tr = document.createElement('tr');
-    const badgeClass = bet.status === 'READY_TO_BET' ? 'badge-ready' : (bet.status === 'QUALIFIED' ? 'badge-qualified' : 'badge-watching');
-    tr.innerHTML = `
-      <td><span class="badge ${badgeClass}">${bet.status.replace(/_/g, ' ')}</span></td>
-      <td><span style="color:var(--accent-cyan); font-weight:700; font-family:var(--font-mono);">${bet.username}</span></td>
-      <td style="font-size:0.78rem; color:var(--text-secondary);">${bet.gameday} ${bet.gametime || ''}</td>
-      <td><strong>${bet.matchup}</strong></td>
-      <td style="font-size:0.75rem; color:var(--text-muted);">${bet.venue || 'MLB Venue'}</td>
-      <td><span class="tag-category">${bet.market}</span></td>
-      <td><code style="font-weight:700;">${bet.selection}</code></td>
-      <td style="font-family:var(--font-mono);">${bet.current_price}</td>
-      <td style="font-family:var(--font-mono);">${(bet.model_prob * 100).toFixed(1)}%</td>
-      <td style="color:var(--accent-green); font-family:var(--font-mono); font-weight:700;">+${(bet.estimated_edge * 100).toFixed(1)}%</td>
-      <td style="font-family:var(--font-mono);">$${bet.stake.toFixed(2)}</td>
-      <td style="font-size:0.75rem; color:var(--text-secondary);">${bet.market_source}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+function renderUpcoming() {
+  const rows=arr('upcoming_bets').filter(r=>(selected('upcoming-env')==='ALL'||(r.env||r.environment)===selected('upcoming-env'))&&(selected('upcoming-round')==='ALL'||r.round_code===selected('upcoming-round')));
+  $('#upcoming-empty').style.display=rows.length?'none':'block'; $('#upcoming-empty').textContent=rows.length?'':'No upcoming predictions are published. A fresh forward-test run is required; no future game or price is guessed.';
+  $('#upcoming-table tbody').innerHTML=rows.map(r=>`<tr><td>${h(r.decision_time)}</td><td>${h(r.strategy_version_id)}</td><td>${h(r.game_pk)}</td><td>${h(r.selection)}</td><td>${r.model_probability==null?'—':fmtPct(r.model_probability*100)}</td><td>${r.fair_price==null?'—':fmtPct(r.fair_price*100)}</td><td class="muted">${h(r.market_price ?? 'No observed quote')}</td><td><span class="badge warning">${h(r.status||'PROPOSED')}</span></td></tr>`).join('');
 }
-
-// ================= OPEN POSITIONS =================
-function renderOpenPositions() {
-  const tbody = document.getElementById('open-positions-body');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-
-  const positions = STATE.openPositions;
-  const countElem = document.getElementById('open-pos-count');
-  if (countElem) {
-    countElem.textContent = `${positions.length} Active Positions`;
-  }
-
-  positions.forEach(pos => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><span style="color:var(--accent-cyan); font-family:var(--font-mono); font-weight:700;">${pos.username}</span></td>
-      <td><strong>${pos.matchup}</strong></td>
-      <td><code>${pos.selection}</code></td>
-      <td style="font-family:var(--font-mono);">${pos.current_price}</td>
-      <td style="font-family:var(--font-mono);">$${pos.stake.toFixed(2)}</td>
-      <td><span class="badge badge-ready">READY TO BET</span></td>
-    `;
-    tbody.appendChild(tr);
-  });
+function renderPositions() {
+  const rows=arr('open_positions'); $('#positions-empty').style.display=rows.length?'none':'block'; $('#positions-empty').textContent=rows.length?'':'No open paper positions. No fills or liquidity are simulated.';
+  $('#positions-table tbody').innerHTML=rows.map(r=>`<tr><td>${h(r.position_id)}</td><td>${h(r.strategy_version_id)}</td><td>${h(r.opened_at)}</td><td>${h(r.state)}</td><td>${fmtN(r.quantity)}</td><td>${h(r.average_price)}</td><td>${h(r.source_observation_ids)}</td></tr>`).join('');
 }
-
-// ================= HISTORY / LEDGER =================
-function renderHistoryTable() {
-  const tbody = document.getElementById('history-table-body');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-
-  const searchVal = (document.getElementById('history-search')?.value || '').toLowerCase();
-  const seasonFilter = document.getElementById('history-season-filter')?.value || 'ALL';
-  const resFilter = document.getElementById('history-res-filter')?.value || 'ALL';
-
-  let list = [...STATE.ledger];
-
-  if (seasonFilter !== 'ALL') {
-    list = list.filter(b => String(b.season) === seasonFilter);
-  }
-
-  if (resFilter !== 'ALL') {
-    list = list.filter(b => b.result === resFilter);
-  }
-
-  if (searchVal) {
-    list = list.filter(b =>
-      b.matchup.toLowerCase().includes(searchVal) ||
-      b.username.toLowerCase().includes(searchVal) ||
-      b.bet_id.toLowerCase().includes(searchVal) ||
-      b.selection.toLowerCase().includes(searchVal)
-    );
-  }
-
-  const totalItems = list.length;
-  const totalPages = Math.ceil(totalItems / STATE.historyPageSize) || 1;
-  if (STATE.historyPage > totalPages) STATE.historyPage = totalPages;
-
-  const startIdx = (STATE.historyPage - 1) * STATE.historyPageSize;
-  const pageItems = list.slice(startIdx, startIdx + STATE.historyPageSize);
-
-  const pageInfo = document.getElementById('history-page-info');
-  if (pageInfo) {
-    pageInfo.textContent = `Showing ${totalItems > 0 ? startIdx + 1 : 0} to ${Math.min(startIdx + STATE.historyPageSize, totalItems)} of ${totalItems} bets`;
-  }
-
-  pageItems.forEach(b => {
-    const tr = document.createElement('tr');
-    const pnlClass = b.pnl > 0 ? 'color: var(--accent-green);' : (b.pnl < 0 ? 'color: var(--accent-red);' : 'color: var(--text-muted);');
-    const resBadge = b.result === 'WIN' ? 'badge-win' : (b.result === 'LOSS' ? 'badge-loss' : 'badge-waiting');
-
-    tr.innerHTML = `
-      <td><code style="font-size:0.75rem;">${b.bet_id}</code></td>
-      <td style="font-size:0.8rem;">${b.season}</td>
-      <td><span style="color:var(--accent-cyan); font-weight:700; font-family:var(--font-mono); font-size:0.8rem;">${b.username}</span></td>
-      <td><strong>${b.matchup}</strong></td>
-      <td><span class="tag-category">${b.market}</span></td>
-      <td><code>${b.selection}</code></td>
-      <td style="font-family:var(--font-mono);">${b.price}</td>
-      <td style="font-family:var(--font-mono);">${(b.model_prob * 100).toFixed(1)}%</td>
-      <td style="color:var(--accent-green); font-family:var(--font-mono);">+${(b.edge * 100).toFixed(1)}%</td>
-      <td style="font-family:var(--font-mono);">$${b.stake.toFixed(2)}</td>
-      <td style="font-size:0.78rem; color:var(--text-secondary);">${b.actual_score}</td>
-      <td><span class="badge ${resBadge}">${b.result}</span></td>
-      <td style="${pnlClass} font-family:var(--font-mono); font-weight:700;">${b.pnl >= 0 ? '+' : ''}$${b.pnl.toFixed(2)}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+function renderHistory() {
+  const q=(document.getElementById('history-search')?.value||'').toLowerCase(), env=selected('history-env'), stat=selected('history-status');
+  const rows=arr('bets_ledger').filter(r=>(env==='ALL'||(r.env||r.environment)===env)&&(stat==='ALL'||(r.status||r.event_type)===stat)&&(!q||JSON.stringify(r).toLowerCase().includes(q)));
+  $('#history-table tbody').innerHTML=rows.length?rows.map(r=>`<tr><td>${h(r.event_type||r.status||'BET')}</td><td>${h(r.bet_id)}</td><td>${h(r.game_pk)}</td><td>${h(r.strategy_id||r.strategy_version_id)}</td><td>${h(r.market)}</td><td>${h(r.selection)}</td><td>${h(r.market_price ?? r.price_american ?? '—')}</td><td>${h(r.result||'—')}</td><td>${r.pnl==null?'—':fmtMoney(r.pnl)}</td><td><span class="badge ${String(r.verification_status||'').includes('VERIFIED')?'good':'warning'}">${h(r.verification_status||'—')}</span></td></tr>`).join(''):'<tr><td colspan="10" class="empty-cell">No immutable wager records match this filter.</td></tr>';
+  const dl=$('#download-ledger'); if(dl&&!dl.dataset.bound){dl.addEventListener('click',()=>{const blob=new Blob([JSON.stringify(arr('bets_ledger'),null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='mlbcomp-ledger.json'; a.click();}); dl.dataset.bound='1';}
 }
-
-function prevHistoryPage() {
-  if (STATE.historyPage > 1) {
-    STATE.historyPage -= 1;
-    renderHistoryTable();
-  }
+function renderAnalytics() {
+  const lb=arr('leaderboard'), evaluated=lb.filter(x=>x.metric_status!=='NO_DATA');
+  const cards=[['Verified price wagers', evaluated.reduce((n,x)=>n+(x.verified_bets||0),0)],['Evaluation picks', evaluated.reduce((n,x)=>n+(x.eval_picks||0),0)],['Strategies with data', evaluated.length],['Open positions', summary().total_open_positions||0]];
+  $('#analytics-cards').innerHTML=cards.map(c=>`<div class="metric"><span>${h(c[0])}</span><strong>${fmtN(c[1])}</strong><small>${evaluated.length?'from published data':'No source-backed performance is available'}</small></div>`).join('');
 }
-
-function nextHistoryPage() {
-  const totalPages = Math.ceil(STATE.ledger.length / STATE.historyPageSize) || 1;
-  if (STATE.historyPage < totalPages) {
-    STATE.historyPage += 1;
-    renderHistoryTable();
-  }
+function renderResearch() {
+  const rows=arr('research_experiments'); $('#research-list').innerHTML=rows.length?rows.map(r=>`<article class="research-card"><div><span class="eyebrow">${h(r.id||'QUESTION')}</span><h3>${h(r.title||r.hypothesis||'Research item')}</h3></div><span class="badge ${r.status==='DATA_UNAVAILABLE'||r.status==='NOT_RUN'?'warning':'neutral'}">${h(r.status||'—')}</span><p>${h(r.conclusion||'')}</p><div class="research-meta">n=${fmtN(r.sample_size)} · env=${h(r.env||'—')} · provenance=${h(r.provenance||'—')}</div></article>`).join(''):'<div class="empty">Research queue is empty. Register a source snapshot to run it.</div>';
 }
-
-// ================= PERFORMANCE CHARTS =================
-function renderPerformanceCharts() {
-  const perfContainer = document.getElementById('perf-equity-chart');
-  const catContainer = document.getElementById('perf-category-chart');
-  const marketContainer = document.getElementById('perf-market-chart');
-  const seasonContainer = document.getElementById('perf-season-chart');
-
-  if (!perfContainer || !catContainer || !marketContainer || !seasonContainer) return;
-
-  // 1. Top 5 Equity curves
-  const top5 = STATE.leaderboard.slice(0, 5);
-  const colors = ['#10b981', '#3b82f6', '#06b6d4', '#f59e0b', '#8b5cf6'];
-  perfContainer.innerHTML = generateMultiLineChartSVG(top5, colors, 600, 260);
-
-  // 2. Category Bar Chart
-  const catPnl = {};
-  STATE.leaderboard.forEach(s => {
-    catPnl[s.category] = (catPnl[s.category] || 0) + s.total_pnl;
-  });
-  catContainer.innerHTML = generateBarChartSVG(catPnl, 600, 260);
-
-  // 3. Market Bar Chart
-  const mktPnl = {
-    'ML': 0,
-    'TOTAL': 0,
-    'F5': 0,
-    'RUNLINE': 0,
-    'TEAM_TOTAL': 0,
-    'KALSHI_PENNANT': 0,
-    'PROP_K': 0
-  };
-  STATE.leaderboard.forEach(s => {
-    for (const [m, p] of Object.entries(s.profit_by_market || {})) {
-      mktPnl[m] = (mktPnl[m] || 0) + p;
-    }
-  });
-  Object.keys(mktPnl).forEach(k => { if (Math.abs(mktPnl[k]) < 1) delete mktPnl[k]; });
-  marketContainer.innerHTML = generateBarChartSVG(mktPnl, 600, 260);
-
-  // 4. Season Performance Chart
-  const seasonPnl = {};
-  STATE.leaderboard.forEach(s => {
-    for (const [yr, p] of Object.entries(s.profit_by_season || {})) {
-      seasonPnl[yr] = (seasonPnl[yr] || 0) + p;
-    }
-  });
-  seasonContainer.innerHTML = generateBarChartSVG(seasonPnl, 600, 260);
+function renderSources() {
+  const status=selected('source-status'), rows=arr('registry').filter(r=>status==='ALL'||(r.verification_status||r.status)===status);
+  $('#sources-table tbody').innerHTML=rows.length?rows.map(r=>`<tr><td><a href="${h(r.url)}" target="_blank" rel="noreferrer">${h(r.name)} ↗</a><small>${h(r.source_id||'')}</small></td><td>${h(r.data_type)}</td><td>${h(r.historical_depth)}</td><td>${h(r.current_availability)}</td><td>${h(r.access_method)}<br><small>${h(r.cost)}</small></td><td>${h(r.reliability)}</td><td><span class="badge ${r.verification_status==='VERIFIED'?'good':'warning'}">${h(r.verification_status)}</span>${r.verification_date?`<small>${h(r.verification_date)}</small>`:''}</td><td>${h(r.limitations)}</td></tr>`).join(''):'<tr><td colspan="8" class="empty-cell">No source registry rows are available.</td></tr>';
 }
-
-// SVG Multi-Line Chart Generator
-function generateMultiLineChartSVG(strategies, colors, width = 600, height = 260) {
-  const padding = { top: 20, right: 140, bottom: 30, left: 60 };
-  const w = width - padding.left - padding.right;
-  const h = height - padding.top - padding.bottom;
-
-  let minVal = 0;
-  let maxVal = 1000;
-  let maxLen = 0;
-
-  strategies.forEach(s => {
-    const curve = s.equity_curve || [];
-    if (curve.length > maxLen) maxLen = curve.length;
-    curve.forEach(pt => {
-      const pnl = pt.pnl !== undefined ? pt.pnl : (pt.bankroll - s.initial_bankroll);
-      if (pnl < minVal) minVal = pnl;
-      if (pnl > maxVal) maxVal = pnl;
-    });
-  });
-
-  const range = (maxVal - minVal) || 1;
-
-  let pathsSvg = '';
-  let legendSvg = '';
-
-  strategies.forEach((s, i) => {
-    const curve = s.equity_curve || [];
-    if (curve.length === 0) return;
-    const col = colors[i % colors.length];
-
-    const pts = curve.map((pt, idx) => {
-      const pnl = pt.pnl !== undefined ? pt.pnl : (pt.bankroll - s.initial_bankroll);
-      const x = padding.left + (idx / (curve.length - 1 || 1)) * w;
-      const y = padding.top + h - ((pnl - minVal) / range) * h;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
-
-    pathsSvg += `<polyline fill="none" stroke="${col}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points="${pts}" />`;
-    legendSvg += `
-      <g transform="translate(${width - padding.right + 10}, ${padding.top + i * 20})">
-        <rect width="12" height="12" rx="2" fill="${col}" />
-        <text x="18" y="10" fill="#9ca3af" font-size="10" font-family="monospace">${s.username.substring(0, 16)}</text>
-      </g>
-    `;
-  });
-
-  const zeroY = padding.top + h - ((0 - minVal) / range) * h;
-  const zeroLine = `<line x1="${padding.left}" y1="${zeroY}" x2="${padding.left + w}" y2="${zeroY}" stroke="#4b5563" stroke-dasharray="3,3" />`;
-
-  return `
-    <svg class="chart-svg" viewBox="0 0 ${width} ${height}">
-      ${zeroLine}
-      <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + h}" class="chart-axis" />
-      <line x1="${padding.left}" y1="${padding.top + h}" x2="${padding.left + w}" y2="${padding.top + h}" class="chart-axis" />
-      <text x="${padding.left - 8}" y="${padding.top + 10}" text-anchor="end" class="chart-label">$${(maxVal / 1000).toFixed(1)}k</text>
-      <text x="${padding.left - 8}" y="${zeroY + 4}" text-anchor="end" class="chart-label">$0</text>
-      <text x="${padding.left - 8}" y="${padding.top + h}" text-anchor="end" class="chart-label">$${(minVal / 1000).toFixed(1)}k</text>
-      <text x="${padding.left}" y="${height - 8}" class="chart-label">2015</text>
-      <text x="${padding.left + w / 2}" y="${height - 8}" class="chart-label">2021</text>
-      <text x="${padding.left + w}" y="${height - 8}" text-anchor="end" class="chart-label">2026 Live</text>
-      ${pathsSvg}
-      ${legendSvg}
-    </svg>
-  `;
-}
-
-// SVG Bar Chart Generator
-function generateBarChartSVG(dataObj, width = 600, height = 260) {
-  const keys = Object.keys(dataObj);
-  const padding = { top: 20, right: 20, bottom: 55, left: 70 };
-  const w = width - padding.left - padding.right;
-  const h = height - padding.top - padding.bottom;
-
-  let maxVal = 100;
-  let minVal = 0;
-  keys.forEach(k => {
-    if (dataObj[k] > maxVal) maxVal = dataObj[k];
-    if (dataObj[k] < minVal) minVal = dataObj[k];
-  });
-
-  const range = (maxVal - minVal) || 1;
-  const barWidth = Math.min(36, (w / keys.length) * 0.7);
-
-  let barsSvg = '';
-  keys.forEach((k, i) => {
-    const val = dataObj[k];
-    const x = padding.left + (i + 0.5) * (w / keys.length) - barWidth / 2;
-    const isPos = val >= 0;
-    const col = isPos ? '#10b981' : '#ef4444';
-
-    const zeroY = padding.top + h - ((0 - minVal) / range) * h;
-    const barH = (Math.abs(val) / range) * h;
-    const y = isPos ? zeroY - barH : zeroY;
-
-    barsSvg += `
-      <rect x="${x}" y="${y}" width="${barWidth}" height="${Math.max(2, barH)}" rx="2" fill="${col}" opacity="0.85" />
-      <text x="${x + barWidth / 2}" y="${height - 30}" text-anchor="middle" class="chart-label" transform="rotate(-15, ${x + barWidth / 2}, ${height - 30})">${k.substring(0, 11)}</text>
-      <text x="${x + barWidth / 2}" y="${isPos ? y - 4 : y + barH + 10}" text-anchor="middle" fill="${col}" font-size="9" font-family="monospace">${val >= 0 ? '+' : ''}$${(val / 1000).toFixed(1)}k</text>
-    `;
-  });
-
-  const zeroY = padding.top + h - ((0 - minVal) / range) * h;
-  return `
-    <svg class="chart-svg" viewBox="0 0 ${width} ${height}">
-      <line x1="${padding.left}" y1="${zeroY}" x2="${padding.left + w}" y2="${zeroY}" stroke="#4b5563" />
-      <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + h}" class="chart-axis" />
-      ${barsSvg}
-    </svg>
-  `;
-}
-
-// ================= RESEARCH LAB =================
-function renderResearchLab() {
-  const container = document.getElementById('research-experiments-container');
-  if (!container) return;
-  container.innerHTML = '';
-
-  STATE.researchExperiments.forEach(exp => {
-    const box = document.createElement('div');
-    box.style.cssText = 'background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 16px; margin-bottom: 16px;';
-
-    let findingsHtml = '';
-    if (exp.findings) {
-      findingsHtml = '<ul style="margin: 8px 0 8px 20px; font-size: 0.82rem; color: var(--text-secondary);">';
-      for (const [k, v] of Object.entries(exp.findings)) {
-        findingsHtml += `<li><code>${k}</code>: ${JSON.stringify(v)}</li>`;
-      }
-      findingsHtml += '</ul>';
-    }
-
-    box.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px;">
-        <h4 style="color:var(--accent-cyan); font-size:1.05rem;">${exp.title}</h4>
-        <span class="badge badge-win">${exp.status}</span>
-      </div>
-      <p style="font-size:0.83rem; color:var(--text-primary); margin-bottom:6px;"><strong>Hypothesis:</strong> ${exp.hypothesis}</p>
-      <p style="font-size:0.78rem; color:var(--text-muted); margin-bottom:6px;"><strong>Sample Size:</strong> ${exp.sample_size} • <strong>Method:</strong> ${exp.methodology}</p>
-      ${findingsHtml}
-      <p style="font-size:0.82rem; color:#34d399; margin-top:6px;"><strong>Conclusion:</strong> ${exp.conclusion}</p>
-      <p style="font-size:0.78rem; color:var(--accent-purple); margin-top:4px;"><strong>Action Taken:</strong> ${exp.action_taken}</p>
-    `;
-    container.appendChild(box);
-  });
-}
-
-// ================= KALSHI DESK =================
-function renderKalshiDesk() {
-  const tbody = document.getElementById('kalshi-trades-body');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-
-  const sampleTrades = STATE.kalshiTrades.slice(0, 15);
-  sampleTrades.forEach(t => {
-    const tr = document.createElement('tr');
-    const pnlClass = t.pnl >= 0 ? 'color: var(--accent-green);' : 'color: var(--accent-red);';
-    tr.innerHTML = `
-      <td><code>${t.contract}</code></td>
-      <td><span class="badge ${t.side === 'YES' ? 'badge-win' : 'badge-loss'}">${t.side}</span></td>
-      <td style="font-family:var(--font-mono);">${t.simulated_fill}¢</td>
-      <td style="font-family:var(--font-mono);">${t.order_size}</td>
-      <td style="font-family:var(--font-mono);">${t.settlement}¢</td>
-      <td style="${pnlClass} font-family:var(--font-mono); font-weight:700;">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</td>
-    `;
-    tbody.appendChild(tr);
-  });
-}
-
-// ================= REGISTRY =================
-function renderRegistry() {
-  const tbody = document.getElementById('registry-table-body');
-  if (!tbody) return;
-  tbody.innerHTML = '';
-
-  STATE.registry.forEach(src => {
-    const tr = document.createElement('tr');
-    const badgeClass = src.status === 'VERIFIED_PRIMARY' ? 'badge-win' : (src.status === 'SECONDARY' ? 'badge-qualified' : 'badge-loss');
-    tr.innerHTML = `
-      <td>
-        <div style="font-weight:700; color:var(--text-primary);"><a href="${src.url}" target="_blank" style="color:var(--accent-cyan); text-decoration:none;">${src.name} ↗</a></div>
-        <div style="font-size:0.75rem; color:var(--text-muted);">${src.provenance}</div>
-      </td>
-      <td style="font-size:0.8rem;">${src.data_type}</td>
-      <td style="font-size:0.78rem; color:var(--text-secondary);">${src.cost_classification}</td>
-      <td><span style="color:var(--accent-green); font-weight:700;">${src.reliability_rating}</span></td>
-      <td style="font-size:0.8rem;">${src.historical_depth}</td>
-      <td style="font-size:0.78rem; color:var(--text-muted);">${src.last_verification_date}</td>
-      <td><span class="badge ${badgeClass}">${src.status.replace(/_/g, ' ')}</span></td>
-    `;
-    tbody.appendChild(tr);
-  });
-}
-
-// ================= VERIFICATION =================
 function renderVerification() {
-  const auditContainer = document.getElementById('audit-checks-container');
-  if (auditContainer) {
-    auditContainer.innerHTML = '';
-    STATE.auditChecks.forEach(chk => {
-      const box = document.createElement('div');
-      box.style.cssText = 'background-color: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 10px; font-size: 0.8rem;';
-      box.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-          <strong style="color:var(--text-primary);">${chk.name}</strong>
-          <span class="badge ${chk.passed ? 'badge-win' : 'badge-loss'}">${chk.passed ? 'PASSED' : 'FAILED'}</span>
-        </div>
-        <div style="color:var(--text-muted); font-size:0.72rem;">${chk.category} • ${chk.details}</div>
-      `;
-      auditContainer.appendChild(box);
-    });
-  }
-
-  const irrBody = document.getElementById('irregularities-table-body');
-  if (irrBody) {
-    irrBody.innerHTML = '';
-    STATE.irregularities.forEach(irr => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><code style="font-size:0.75rem;">${irr.id}</code></td>
-        <td><strong>${irr.title}</strong></td>
-        <td><span class="tag-category">${irr.category}</span></td>
-        <td><span class="badge ${irr.severity === 'CRITICAL' || irr.severity === 'HIGH' ? 'badge-loss' : 'badge-waiting'}">${irr.severity}</span></td>
-        <td style="font-size:0.8rem; color:var(--text-secondary);">${irr.description}</td>
-        <td style="font-size:0.8rem; color:var(--accent-green);">${irr.resolution}</td>
-      `;
-      irrBody.appendChild(tr);
-    });
-  }
+  const rows=arr('audit_checks'), passed=rows.filter(r=>r.passed).length; $('#audit-summary').innerHTML=`<strong>${passed}/${rows.length||0}</strong><span>control checks pass</span><small>Controls are not a substitute for source availability.</small>`;
+  $('#audit-list').innerHTML=rows.map(r=>`<div class="audit-item"><div><b>${h(r.name)}</b><span class="badge ${r.passed?'good':'bad'}">${r.passed?'PASS':'FAIL'}</span></div><small>${h(r.category)} · ${h(r.details)}</small></div>`).join('');
+  $('#issues-list').innerHTML=arr('irregularities').map(r=>`<div class="issue"><div><b>${h(r.id)} · ${h(r.title)}</b><span class="badge ${r.severity==='CRITICAL'?'bad':'warning'}">${h(r.severity||r.status||'INFO')}</span></div><p>${h(r.description)}</p><small>Status: ${h(r.status||'—')} · Resolution: ${h(r.resolution||'open')}</small></div>`).join('');
 }
 
-// ================= MODAL DEEP DIVE =================
-function openStrategyModal(stratId) {
-  const strat = STATE.strategies.find(s => s.id === stratId);
-  const perf = STATE.leaderboard.find(p => p.id === stratId);
-  if (!strat) return;
-
-  const modal = document.getElementById('strat-modal');
-  const content = document.getElementById('modal-strat-content');
-
-  const pnlClass = perf && perf.total_pnl >= 0 ? 'color: var(--accent-green);' : 'color: var(--accent-red);';
-
-  content.innerHTML = `
-    <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
-      <div>
-        <h2 style="color:var(--accent-cyan); font-family:var(--font-mono); font-size:1.4rem;">${strat.username}</h2>
-        <h3 style="font-size:1.1rem; color:var(--text-primary);">${strat.name}</h3>
-      </div>
-      <div>
-        <span class="badge badge-ready" style="font-size:0.85rem; margin-right:6px;">Environment: ${strat.env}</span>
-        <span class="tag-version" style="font-size:0.85rem; padding:4px 10px;">Ver: ${strat.version}</span>
-      </div>
-    </div>
-
-    <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; background-color:var(--bg-input); padding:12px; border-radius:var(--radius); margin-bottom:16px;">
-      <div>
-        <span class="strat-metric-lbl">Total PnL</span>
-        <div style="${pnlClass} font-size:1.2rem; font-weight:700; font-family:var(--font-mono);">${perf ? (perf.total_pnl >= 0 ? '+' : '') + '$' + perf.total_pnl.toLocaleString('en-US', {minimumFractionDigits:2}) : '$0.00'}</div>
-      </div>
-      <div>
-        <span class="strat-metric-lbl">ROI</span>
-        <div style="font-size:1.2rem; font-weight:700; font-family:var(--font-mono);">${perf ? perf.roi : 0}%</div>
-      </div>
-      <div>
-        <span class="strat-metric-lbl">Win Rate</span>
-        <div style="font-size:1.2rem; font-weight:700; font-family:var(--font-mono);">${perf ? perf.win_rate : 0}%</div>
-      </div>
-      <div>
-        <span class="strat-metric-lbl">Total Bets</span>
-        <div style="font-size:1.2rem; font-weight:700; font-family:var(--font-mono);">${perf ? perf.total_bets.toLocaleString() : 0}</div>
-      </div>
-    </div>
-
-    <div style="margin-bottom:14px;">
-      <h4 style="color:var(--text-secondary); text-transform:uppercase; font-size:0.75rem; margin-bottom:4px;">1. Research Hypothesis</h4>
-      <p style="font-size:0.85rem; line-height:1.5; background-color:var(--bg-card); padding:10px; border-radius:var(--radius); border-left:3px solid var(--accent-cyan);">${strat.hypothesis}</p>
-    </div>
-
-    <div style="margin-bottom:14px;">
-      <h4 style="color:var(--text-secondary); text-transform:uppercase; font-size:0.75rem; margin-bottom:4px;">2. Data Dependencies</h4>
-      <p style="font-size:0.85rem; color:var(--text-primary);"><code>${(strat.data_sources || []).join(', ')}</code></p>
-    </div>
-
-    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:14px;">
-      <div style="background-color:var(--bg-card); padding:10px; border-radius:var(--radius);">
-        <h4 style="color:var(--text-secondary); text-transform:uppercase; font-size:0.75rem; margin-bottom:4px;">3. Entry Rule</h4>
-        <p style="font-size:0.82rem;">${strat.entry_rule}</p>
-      </div>
-      <div style="background-color:var(--bg-card); padding:10px; border-radius:var(--radius);">
-        <h4 style="color:var(--text-secondary); text-transform:uppercase; font-size:0.75rem; margin-bottom:4px;">4. Pricing & Edge Rule</h4>
-        <p style="font-size:0.82rem;">${strat.price_rule}</p>
-      </div>
-    </div>
-
-    <div style="margin-bottom:14px;">
-      <h4 style="color:var(--accent-red); text-transform:uppercase; font-size:0.75rem; margin-bottom:4px;">5. Post-Hoc Failure Analysis</h4>
-      <p style="font-size:0.83rem; color:var(--text-secondary);">${strat.failure_analysis || 'No major failure clusters identified.'}</p>
-    </div>
-
-    <div style="margin-bottom:14px;">
-      <h4 style="color:var(--accent-yellow); text-transform:uppercase; font-size:0.75rem; margin-bottom:4px;">6. Known Limitations</h4>
-      <p style="font-size:0.83rem; color:var(--text-secondary);">${strat.limitations || 'None documented.'}</p>
-    </div>
-  `;
-
-  modal.classList.add('open');
+function openStrategy(id) {
+  const s=arr('strategies').find(x=>x.id===id||x.strategy_id===id); if(!s)return; const metrics=arr('leaderboard').filter(x=>x.id===id); const wagers=arr('bets_ledger').filter(x=>String(x.strategy_id||x.strategy_version_id||'').includes(id));
+  $('#modal-body').innerHTML=`<p class="eyebrow">${h(s.env)} · ${h(s.version||'v1')}</p><h2>${h(s.id)}</h2><h3>${h(s.name)}</h3><span class="badge warning">${h(s.status||'NOT_RUN')}</span><div class="modal-grid"><div><b>Hypothesis</b><p>${h(s.hypothesis)}</p></div><div><b>Data requirements</b><p>${h((s.data_requirements||[]).join(', ')||'—')}</p></div><div><b>Entry rule</b><p>${h(s.entry_rule||'—')}</p></div><div><b>Required price</b><p>${h(s.required_price_rule||'—')}</p></div><div><b>Sizing</b><p>${h(s.sizing_rule||'—')}</p></div><div><b>Settlement</b><p>${h(s.settlement_rule||'—')}</p></div><div><b>Testing</b><p>${h(s.test_plan||'—')}</p></div><div><b>Limitations</b><p>${h(s.limitations||'—')}</p></div></div><hr><p><b>Published environment rows:</b> ${metrics.length} · <b>Individual ledger records:</b> ${wagers.length}</p><p class="muted">Performance is not shown as an edge claim when the data gate is not satisfied.</p>`;
+  $('#strategy-modal').classList.add('open'); $('#strategy-modal').setAttribute('aria-hidden','false');
 }
+function closeModal(){ $('#strategy-modal').classList.remove('open'); $('#strategy-modal').setAttribute('aria-hidden','true'); }
 
-function closeModal() {
-  document.getElementById('strat-modal').classList.remove('open');
-}
-
-// Close modal when clicking outside content
-window.addEventListener('click', (e) => {
-  const modal = document.getElementById('strat-modal');
-  if (e.target === modal) {
-    closeModal();
-  }
-});
-
-// ================= SIMULATOR SANDBOX =================
-function runSandboxOrderSim() {
-  const probInput = parseFloat(document.getElementById('sim-model-prob').value) / 100.0;
-  const oddsInput = document.getElementById('sim-market-odds').value.trim();
-  const gameSelect = document.getElementById('sim-game-select').value;
-  const resBox = document.getElementById('sim-result-box');
-
-  let impliedProb = 0.5238;
-  let decOdds = 1.909;
-
-  if (oddsInput.includes('¢')) {
-    const cents = parseFloat(oddsInput.replace('¢', ''));
-    impliedProb = cents / 100.0;
-    decOdds = 100.0 / cents;
-  } else {
-    const num = parseFloat(oddsInput);
-    if (num > 0) {
-      decOdds = 1.0 + num / 100.0;
-      impliedProb = 100.0 / (num + 100.0);
-    } else {
-      decOdds = 1.0 + 100.0 / Math.abs(num);
-      impliedProb = Math.abs(num) / (Math.abs(num) + 100.0);
-    }
-  }
-
-  const edge = probInput - impliedProb;
-  const kellyPct = Math.max(0, (probInput * (decOdds - 1) - (1 - probInput)) / (decOdds - 1)) * 0.25;
-  const recStake = Math.round(kellyPct * 10000);
-
-  resBox.style.display = 'block';
-  resBox.innerHTML = `
-    <div style="font-weight:700; color:var(--accent-cyan); margin-bottom:4px;">SIMULATION EXECUTION RESULT</div>
-    <div>Selected Matchup: <strong>${gameSelect}</strong></div>
-    <div>Model Probability: <strong>${(probInput * 100).toFixed(1)}%</strong> | Market Implied: <strong>${(impliedProb * 100).toFixed(1)}%</strong></div>
-    <div style="color:${edge > 0 ? 'var(--accent-green)' : 'var(--accent-red)'}; font-weight:700;">Calculated Edge: ${(edge * 100).toFixed(2)}%</div>
-    <div>Recommended Quarter-Kelly Stake: <strong>$${recStake}</strong> (${(kellyPct * 100).toFixed(2)}% of $10,000 bankroll)</div>
-    <div>Simulated Execution Slippage: <strong>0.5¢ / 0.0 pts</strong> • Liquidity: <strong>Available</strong></div>
-  `;
-}
-
-// ================= EXPORT TOOLS =================
-function exportLedgerCSV() {
-  if (STATE.ledger.length === 0) return;
-  const headers = Object.keys(STATE.ledger[0]);
-  let csv = headers.join(',') + '\n';
-  STATE.ledger.forEach(row => {
-    csv += headers.map(h => JSON.stringify(row[h] !== undefined ? row[h] : '')).join(',') + '\n';
-  });
-
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `MLBComp_Bet_Ledger_${new Date().toISOString().slice(0, 10)}.csv`;
-  a.click();
-}
-
-function exportLedgerJSON() {
-  if (STATE.ledger.length === 0) return;
-  const blob = new Blob([JSON.stringify(STATE.ledger, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `MLBComp_Bet_Ledger_${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-}
+document.addEventListener('DOMContentLoaded',()=>{initTabs(); $('#modal-close').addEventListener('click',closeModal); $('#strategy-modal').addEventListener('click',e=>{if(e.target.id==='strategy-modal')closeModal();}); loadData();});

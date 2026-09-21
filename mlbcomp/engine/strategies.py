@@ -1,297 +1,362 @@
-"""Models + strategy catalog (spec §15, §16, §20).
+"""Autonomous strategy catalog and point-in-time model functions.
 
-Every model is a function: (game_row, features_row, ctx) -> dict with
-at least {"p_home": float}.  ctx carries shared state (Elo, series state,
-learned round intercepts) that is updated only after a game completes
-(anti-leakage).
-
-Strategy IDs follow the naming convention:
-    MLB_{REG|POST}_{ROUND}_{CATEGORY}_{NNN}
+The catalog is intentionally broad, but a catalog entry is not a performance
+claim.  Each entry carries its data gate and is ``DATA_UNAVAILABLE`` until the
+required observations (for example an announced lineup or a timestamped prop
+quote) are actually present.  Regular-season and postseason entries are never
+shared implicitly; postseason round codes are explicit.
 """
 from __future__ import annotations
 
 import math
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
-from ..config import KELLY_FRACTION, MAX_STAKE_PCT, MIN_EDGE
-from ..features.engine import poisson_win_prob
+from ..config import MARKETS, MIN_EDGE, prob_to_am
 
 
 def _sig(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-x))
+    return 1.0 / (1.0 + math.exp(-max(-40.0, min(40.0, float(x)))))
 
 
 def _logit(p: float) -> float:
-    p = min(max(p, 1e-6), 1 - 1e-6)
+    p = min(max(float(p), 1e-6), 1 - 1e-6)
     return math.log(p / (1 - p))
 
 
-# ------------------------------------------------------------------ models
+def _num(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------- models
+
 def model_elo(g, f, ctx) -> float:
-    return f["p_elo"]
+    return float(f["p_elo"])
 
 
 def model_form(g, f, ctx) -> float:
-    """Rolling 30-game run-differential model + home advantage."""
-    if f["h_n_games"] < 5 or f["a_n_games"] < 5:
-        return np.nan
+    if f.get("h_n_games", 0) < 5 or f.get("a_n_games", 0) < 5:
+        return float("nan")
     return _sig(1.3 * (f["h_run_diff_pg"] - f["a_run_diff_pg"]) + 0.20)
 
 
 def model_season(g, f, ctx) -> float:
-    """Season-to-date (expanding) run-differential model + home advantage."""
-    if f["h_season_g"] < 10 or f["a_season_g"] < 10:
-        return np.nan
+    if f.get("h_season_g", 0) < 10 or f.get("a_season_g", 0) < 10:
+        return float("nan")
     return _sig(1.3 * (f["h_season_rd"] - f["a_season_rd"]) + 0.20)
 
 
 def model_lateform(g, f, ctx) -> float:
-    """Late-season (September, last ~15 games) form model."""
-    if pd.isna(f["h_sep_rd"]) or pd.isna(f["a_sep_rd"]):
-        return np.nan
+    if not (_num(f.get("h_sep_rd")) and _num(f.get("a_sep_rd"))):
+        return float("nan")
     return _sig(1.3 * (f["h_sep_rd"] - f["a_sep_rd"]) + 0.20)
 
 
 def model_poisson_total(g, f, ctx, line: float = 8.5) -> float:
-    """Poisson run-rate model.  Returns P(OVER line) for the totals market."""
-    if f["h_n_games"] < 5 or f["a_n_games"] < 5:
-        return np.nan
-    lh = max(0.5, f["h_rs_pg"] * f["a_ra_pg"] / 4.5)
-    la = max(0.5, f["a_rs_pg"] * f["h_ra_pg"] / 4.5)
-    # P(sum > line) via convolution of two Poissons
-    M = 40
-    ph = [math.exp(-lh) * lh ** i / math.factorial(i) for i in range(M + 1)]
-    pa = [math.exp(-la) * la ** i / math.factorial(i) for i in range(M + 1)]
-    conv = [0.0] * (2 * M + 1)
-    for i in range(M + 1):
-        if ph[i] == 0:
-            continue
-        for j in range(M + 1):
-            conv[i + j] += ph[i] * pa[j]
-    p_over = sum(conv[int(math.floor(line + 1e-9)) + 1:])
-    return p_over
+    if f.get("h_n_games", 0) < 5 or f.get("a_n_games", 0) < 5:
+        return float("nan")
+    lh = max(0.5, float(f["h_rs_pg"]) * float(f["a_ra_pg"]) / 4.5)
+    la = max(0.5, float(f["a_rs_pg"]) * float(f["h_ra_pg"]) / 4.5)
+    # P(X+Y > line), with no market line implied: line is a model hypothesis
+    # and must not be confused with an observed sportsbook total.
+    limit = 40
+    total_prob = 0.0
+    for i in range(limit + 1):
+        pi = math.exp(-lh) * lh ** i / math.factorial(i)
+        for j in range(limit + 1):
+            if i + j > line:
+                total_prob += pi * math.exp(-la) * la ** j / math.factorial(j)
+    return min(max(total_prob, 0.0), 1.0)
 
 
 def model_hierarchical(g, f, ctx) -> float:
-    """Hierarchical REG-prior + PO-likelihood model (spec §7, §8).
-
-    p = w * p_observational + (1 - w) * p_prior
-    where the prior is the regular-season Elo and the observational signal
-    combines late-season form with actual series performance so far.  w
-    grows with the amount of postseason evidence (shrinkage / partial
-    pooling: the prior wins while the sample is tiny).
-    """
-    p_prior = f["p_elo"]
-    if pd.isna(p_prior):
-        return np.nan
-    p_obs = _sig(1.3 * (f["h_sep_rd"] - f["a_sep_rd"]) + 0.20) \
-        if not (pd.isna(f["h_sep_rd"]) or pd.isna(f["a_sep_rd"])) else 0.5
-    # series evidence
-    n_prior = f.get("n_series_games_before", 0) or 0
-    if n_prior > 0:
-        wa = f.get("wins_a_before", 0) or 0
-        wb = f.get("wins_b_before", 0) or 0
-        # team_a is the series' first-game home team; map to this game
-        a_id = ctx["series_team_a"]
-        home = int(g.home_team_id)
-        my_w = wa if home == a_id else wb
-        opp_w = wb if home == a_id else wa
-        p_series = _sig(2.5 * (my_w - opp_w) / (1 + n_prior * 0.3))
-        p_obs = 0.5 * p_obs + 0.5 * p_series
-    w = min(0.8, 0.25 * n_prior) + 0.15   # base weight on observational 0.15
-    return w * p_obs + (1 - w) * p_prior
+    prior = f.get("p_elo", float("nan"))
+    if not _num(prior):
+        return float("nan")
+    late = model_lateform(g, f, ctx)
+    obs = late if _num(late) else 0.5
+    n = int(ctx.get("series", {}).get(str(getattr(g, "series_key", "")), {}).get("n", 0))
+    state = ctx.get("series", {}).get(str(getattr(g, "series_key", "")), {})
+    if n:
+        a_id = state.get("a")
+        wins = state.get("wa", 0) if int(g.home_team_id) == a_id else state.get("wb", 0)
+        losses = state.get("wb", 0) if int(g.home_team_id) == a_id else state.get("wa", 0)
+        obs = 0.5 * obs + 0.5 * _sig(1.8 * (wins - losses) / (1.0 + 0.25 * n))
+    weight = min(0.8, 0.15 + 0.20 * n)
+    return float(weight * obs + (1.0 - weight) * prior)
 
 
 def model_round_specific(g, f, ctx) -> float:
-    """Round-specific model: Elo logit + learned round intercept.
-
-    The intercept is estimated from PRIOR-season postseason games only
-    (walk-forward; minimum 15 games per round, else 0).  This is the
-    dedicated per-round model (Model D, spec §16).
-    """
-    p = f["p_elo"]
-    if pd.isna(p):
-        return np.nan
-    rnd = g.round_code
-    intercept = ctx["round_intercepts"].get(rnd, 0.0)
-    return _sig(_logit(p) + intercept)
+    p = f.get("p_post_elo", f.get("p_elo", float("nan")))
+    if not _num(p):
+        p = f.get("p_elo", float("nan"))
+    if not _num(p):
+        return float("nan")
+    intercept = ctx.get("round_intercepts", {}).get(getattr(g, "round_code", None), 0.0)
+    return _sig(_logit(p) + float(intercept))
 
 
 def model_xreg(g, f, ctx) -> float:
-    """Model A (spec §16): the regular-season model applied unchanged to
-    postseason games (control)."""
-    return f["p_elo"]
+    # Permanent control: regular-season model transferred unchanged.
+    return model_elo(g, f, ctx)
 
 
-def model_market_fade_longshot(g, f, ctx) -> float:
-    """Market-based: model probability is the devigged market; the strategy
-    (see catalog) bets favorites priced <= -150 to test the longshot bias."""
-    if pd.isna(f.get("home_odds", np.nan)) or pd.isna(f.get("away_odds", np.nan)):
-        return np.nan
+def model_market(g, f, ctx) -> float:
+    # A historical price without a verified availability timestamp is not an
+    # eligible model feature; using it would leak closing information.
+    if not f.get("market_quote_verified", False):
+        return float("nan")
     from ..config import am_to_prob, devig_two
-    ph, pa = am_to_prob(f["home_odds"]), am_to_prob(f["away_odds"])
-    ph, pa = devig_two(ph, pa)
-    return ph
+    h, a = am_to_prob(f.get("home_odds")), am_to_prob(f.get("away_odds"))
+    h, a = devig_two(h, a)
+    return h
 
 
-MODELS = {
-    "elo": model_elo,
-    "form": model_form,
-    "season": model_season,
-    "lateform": model_lateform,
-    "poisson_total": model_poisson_total,
-    "hierarchical": model_hierarchical,
-    "round_specific": model_round_specific,
-    "xreg": model_xreg,
-    "market": model_market_fade_longshot,
+MODELS: dict[str, Callable] = {
+    "elo": model_elo, "form": model_form, "season": model_season,
+    "lateform": model_lateform, "poisson_total": model_poisson_total,
+    "hierarchical": model_hierarchical, "round_specific": model_round_specific,
+    "xreg": model_xreg, "market": model_market,
 }
 
-# ------------------------------------------------------------------ strategies
+
+@dataclass
 class Strategy:
-    def __init__(self, sid, name, env, model, market, hypothesis,
-                 min_edge=MIN_EDGE, notes="", extra=None):
-        self.sid = sid
-        self.name = name
-        self.env = env            # REG / WC / DS / LCS / WS / POST
-        self.model = model        # key in MODELS
-        self.market = market      # ML / TOTAL
-        self.hypothesis = hypothesis
-        self.min_edge = min_edge
-        self.notes = notes
-        self.extra = extra or {}
+    sid: str
+    name: str
+    env: str
+    model: str
+    market: str
+    hypothesis: str
+    data_requirements: tuple[str, ...] = ()
+    entry_rule: str = "Only evaluate when every required input is available before the decision timestamp."
+    required_price_rule: str = "Require an observed, timestamped quote at or before the decision timestamp; otherwise EVAL/PROPOSED, never a wager."
+    sizing_rule: str = "Quarter Kelly on the observed price, capped at 5% of strategy bankroll; no stake without a price."
+    settlement_rule: str = "Use the market's documented settlement rule and an independently observed result; W/L/P/V only."
+    test_plan: str = "Chronological train/validate/out-of-sample test, then forward test and paper trade."
+    limitations: str = "No causal claim; small samples remain inconclusive."
+    min_edge: float = MIN_EDGE
+    notes: str = ""
+    version: str = "v1"
+    parent_version: str | None = None
+    status: str = "NOT_RUN"
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def strategy_id(self) -> str:
+        return self.sid
 
     def applies_to(self, game_row) -> bool:
-        env = self.env
-        if env == "REG":
-            return game_row.game_type == "R"
-        if env == "POST":
-            return game_row.round_code is not None and not pd.isna(game_row.round_code)
-        if env in ("WC", "DS", "LCS", "WS"):
-            return game_row.round_code == env
-        return True
+        round_code = getattr(game_row, "round_code", None)
+        game_type = getattr(game_row, "game_type", None)
+        if self.env == "REG":
+            return game_type == "R" or (pd.isna(round_code) if round_code is not None else True)
+        if self.env == "POST":
+            return round_code in {"WC", "DS", "LCS", "WS"}
+        if self.env in {"WC", "DS", "LCS", "WS"}:
+            return round_code == self.env
+        return False
 
-    def decide(self, g, f, ctx):
-        """Return dict(selection, p_model, fair_price, market) or None."""
-        p = MODELS[self.model](g, f, ctx)
-        if p is None or (isinstance(p, float) and (math.isnan(p) or p is None)):
+    def model_probability(self, g, f, ctx) -> float:
+        if self.model not in MODELS:
+            return float("nan")
+        try:
+            p = MODELS[self.model](g, f, ctx)
+            return float(p) if _num(p) else float("nan")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return float("nan")
+
+    def decide(self, g, f, ctx) -> dict[str, Any] | None:
+        p_home = self.model_probability(g, f, ctx)
+        if not _num(p_home):
             return None
-        p = float(p)
-        if self.market == "TOTAL":
-            p_over = p
-            if abs(p_over - 0.5) < self.min_edge:
+        p_home = min(max(p_home, 1e-6), 1 - 1e-6)
+        if self.market in {"TOTAL", "F5_TOTAL", "TEAM_TOTAL"}:
+            line = float(self.extra.get("line", 8.5))
+            p_over = p_home
+            selection = "OVER" if p_over >= 0.5 else "UNDER"
+            p_selection = p_over if selection == "OVER" else 1.0 - p_over
+            if p_selection < 0.5 + self.min_edge:
                 return None
-            sel = "OVER" if p_over > 0.5 else "UNDER"
-            line = self.extra.get("line", 8.5)
-            fair = p_over if sel == "OVER" else 1 - p_over
-            return {"selection": sel, "p_model": p_over, "fair_price": fair,
-                    "market": "TOTAL", "line": line}
-        # moneyline
-        if p < 0.50 + self.min_edge and p > 0.50 - self.min_edge:
-            pass  # decided below via edge
-        if p >= 0.5:
-            sel, p_sel = "HOME", p
-        else:
-            sel, p_sel = "AWAY", 1 - p
-        if pd.notna(f.get("home_odds", np.nan)) and pd.notna(f.get("away_odds", np.nan)):
-            from ..config import am_to_prob, devig_two
-            ph, pa = devig_two(am_to_prob(f["home_odds"]), am_to_prob(f["away_odds"]))
-            p_mkt = ph if sel == "HOME" else pa
-            edge = p_sel - p_mkt
-            if edge < self.min_edge:
-                return None
-        else:
-            p_mkt = 0.5
-            edge = p_sel - 0.5
-            if edge < max(self.min_edge, 0.04):
-                return None
-        return {"selection": sel, "p_model": p_sel, "fair_price": p_sel,
-                "market": "ML", "edge": edge, "p_market": p_mkt}
+            return {"selection": f"{selection} {line:g}", "p_model": p_selection,
+                    "fair_price": p_selection, "required_price": prob_to_am(p_selection),
+                    "market": self.market, "line": line, "edge": None}
+        selection = "HOME" if p_home >= 0.5 else "AWAY"
+        p_selection = p_home if selection == "HOME" else 1.0 - p_home
+        # The price gate is applied by the runner against a quote.  A no-price
+        # prediction can still be evaluated for Brier/log-loss.
+        return {"selection": selection, "p_model": p_selection,
+                "fair_price": p_selection, "required_price": prob_to_am(p_selection),
+                "market": self.market, "edge": None}
+
+    def to_record(self) -> dict[str, Any]:
+        record = asdict(self)
+        record.update({"id": self.sid, "strategy_id": self.sid,
+                       "env": self.env, "data_requirements": list(self.data_requirements),
+                       "env_label": self.env})
+        return record
+
+
+# ---------------------------------------------------------------- catalog helpers
+
+def _s(sid: str, name: str, env: str, model: str, market: str, hypothesis: str,
+       requirements: tuple[str, ...], **kwargs) -> Strategy:
+    return Strategy(sid, name, env, model, market, hypothesis, requirements, **kwargs)
 
 
 def build_catalog() -> list[Strategy]:
-    return [
-        # ---------------- regular season
-        Strategy("MLB_REG_ELO_001", "Elo (regular season)", "REG", "elo", "ML",
-                 "Elo ratings updated game-by-game contain an exploitable edge "
-                 "over sportsbook prices."),
-        Strategy("MLB_REG_FORM_001", "30-game form (regular season)", "REG", "form", "ML",
-                 "Recent run differential predicts wins better than the market."),
-        Strategy("MLB_REG_SEASON_001", "Season-to-date strength (regular season)", "REG",
-                 "season", "ML", "Full-season run differential contains an edge."),
-        Strategy("MLB_REG_LATEFORM_001", "Late-season form (regular season)", "REG",
-                 "lateform", "ML", "September form is more predictive than full-season "
-                 "averages (spec §28 Q09)."),
-        Strategy("MLB_REG_TOTALS_001", "Poisson run-rate totals", "REG", "poisson_total",
-                 "TOTAL", "Poisson run-rate model beats a flat 8.5 line.",
-                 extra={"line": 8.5}),
-        Strategy("MLB_REG_FAV_BIAS_001", "Strong favorites (regular season)", "REG",
-                 "elo", "ML",
-                 "Longshot bias: strong favorites priced <= -150 are "
-                 "underpriced by the market (Elo signal, market filter).",
-                 min_edge=-1.0,  # gating happens in special_rules
-                 extra={"fav_max": -150.0}),
-        # ---------------- postseason (round-specific)
-        Strategy("MLB_POST_WC_ELO_001", "Wild Card Elo", "WC", "round_specific", "ML",
-                 "Round-specific Elo intercept (learned from prior seasons) "
-                 "improves Wild Card predictions."),
-        Strategy("MLB_POST_DS_ELO_001", "Division Series Elo", "DS", "round_specific", "ML",
-                 "Round-specific Elo intercept improves Division Series predictions."),
-        Strategy("MLB_POST_LCS_ELO_001", "LCS Elo", "LCS", "round_specific", "ML",
-                 "Round-specific Elo intercept improves LCS predictions."),
-        Strategy("MLB_POST_WS_ELO_001", "World Series Elo", "WS", "round_specific", "ML",
-                 "Round-specific Elo intercept improves World Series predictions."),
-        Strategy("MLB_POST_HIERARCHICAL_001", "Hierarchical REG+PO model", "POST",
-                 "hierarchical", "ML",
-                 "A hierarchical model (regular-season prior + postseason likelihood "
-                 "with shrinkage) outperforms either environment alone (spec §7, §16E)."),
-        Strategy("MLB_POST_LATESEASON_001", "Late-season prior (postseason)", "POST",
-                 "lateform", "ML",
-                 "Late-regular-season form predicts postseason games better than the "
-                 "full season (spec §28 Q10)."),
-        Strategy("MLB_POST_SERIESSTATE_001", "Series state (elimination/clinching)",
-                 "POST", "elo", "ML",
-                 "Series state (elimination/clinching) creates a measurable behavioral "
-                 "edge (spec §28 Q12-14).", min_edge=0.03),
-        Strategy("MLB_POST_XREG_001", "Regular-season model on PO (control)", "POST",
-                 "xreg", "ML",
-                 "Control: the unadjusted regular-season model applied to postseason "
-                 "games (Model A, spec §16)."),
+    """Return the complete research library, including hypotheses not yet runnable."""
+    reg: list[Strategy] = [
+        _s("MLB_REG_ELO_001", "Elo baseline", "REG", "elo", "ML",
+           "A time-decayed team-strength baseline is calibrated before first pitch.", ("games.scores",)),
+        _s("MLB_REG_FORM_001", "Thirty-game form", "REG", "form", "ML",
+           "Recent run differential contains information after controlling for long-run strength.", ("games.scores",)),
+        _s("MLB_REG_SEASON_001", "Season-to-date strength", "REG", "season", "ML",
+           "Expanding season run differential is a useful pre-game strength signal.", ("games.scores",)),
+        _s("MLB_REG_LATEFORM_001", "Late-season form", "REG", "lateform", "ML",
+           "September form adds information beyond the full season.", ("games.scores",)),
+        _s("MLB_REG_TOTALS_001", "Poisson run-rate totals", "REG", "poisson_total", "TOTAL",
+           "A point-in-time run-rate distribution forecasts totals; no line is invented when absent.", ("games.scores", "markets.total")),
+        _s("MLB_REG_FAV_BIAS_001", "Favorite-price test", "REG", "elo", "ML",
+           "Strong-favorite pricing may differ from a calibrated team-strength probability.", ("games.scores", "markets.moneyline"), min_edge=0.0, extra={"fav_max": -150.0}),
+        _s("MLB_REG_STARTER_001", "Starting-pitcher prior", "REG", "elo", "ML",
+           "Verified starter quality and handedness improve the team baseline.", ("games.scores", "starting_pitchers", "statistics.pitching"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_STARTER_SPLIT_001", "Starter matchup splits", "REG", "elo", "ML",
+           "Pitcher/batter handedness and pitch-quality splits are predictive pre-game.", ("starting_pitchers", "statistics.splits"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_PITCH_MIX_001", "Pitch mix and velocity", "REG", "elo", "ML",
+           "Recent pitch mix/velocity changes adjust starter expectations.", ("statcast.pitch_level",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_BULLPEN_001", "Bullpen availability", "REG", "elo", "ML",
+           "Reliever workload and high-leverage availability improve full-game forecasts.", ("bullpen_usage",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_BULLPEN_FATIGUE_001", "Bullpen fatigue", "REG", "elo", "ML",
+           "Back-to-back and recent pitch workload affect late-game win probability.", ("bullpen_usage",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_LEVERAGE_001", "High-leverage reliever usage", "REG", "elo", "ML",
+           "Available high-leverage relievers matter after the starter exits.", ("bullpen_usage", "statistics.leverage"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_LINEUP_001", "Confirmed lineup strength", "REG", "elo", "ML",
+           "Confirmed batting-order quality shifts pre-game probability.", ("lineups", "players.statistics"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_PLATOON_001", "Platoon advantage", "REG", "elo", "ML",
+           "Verified batter/pitcher handedness splits improve lineup estimates.", ("lineups", "statistics.splits"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_INJURY_001", "Injury availability", "REG", "elo", "ML",
+           "Timestamped injury/news availability changes the lineup prior.", ("injuries", "lineups"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_STATCAST_001", "Statcast contact quality", "REG", "elo", "ML",
+           "Point-in-time quality-of-contact trends add signal beyond runs.", ("statcast.pitch_level",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_DEFENSE_001", "Defense and baserunning", "REG", "elo", "ML",
+           "Defense and baserunning ratings improve expected run prevention.", ("statistics.fielding", "statistics.baserunning"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_WEATHER_001", "Weather and roof state", "REG", "elo", "ML",
+           "Forecast available before first pitch changes expected scoring.", ("weather.forecast", "venues"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_PARK_001", "Park run environment", "REG", "elo", "TOTAL",
+           "Park and roof effects improve a run-distribution forecast.", ("venues", "weather"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_UMPIRE_001", "Umpire zone", "REG", "elo", "TOTAL",
+           "Timestamped umpire assignments and zone tendencies affect totals.", ("umpires", "statistics.zone"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_REST_001", "Rest and travel", "REG", "elo", "ML",
+           "Rest, distance and time-zone changes affect team performance.", ("travel_rest", "schedule"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_SCHEDULE_001", "Scheduling spots", "REG", "elo", "ML",
+           "Getaway days, doubleheaders and opponent sequence create measurable effects.", ("schedule",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_MARKET_MOVE_001", "Opening-to-current movement", "REG", "market", "ML",
+           "Observed market movement contains information when timestamps and liquidity exist.", ("markets.moneyline.open_current",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_CLOSING_001", "Closing-line benchmark", "REG", "market", "ML",
+           "Closing prices are a benchmark, not a look-ahead feature at entry.", ("markets.moneyline.close",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_F5_001", "First-five moneyline", "REG", "elo", "F5_ML",
+           "Starter-focused probability can differ from full-game market price.", ("starting_pitchers", "markets.f5"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_F5_TOTAL_001", "First-five total", "REG", "poisson_total", "F5_TOTAL",
+           "Starter run distribution forecasts a verified first-five line.", ("starting_pitchers", "markets.f5_total"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_RL_001", "Run-line value", "REG", "elo", "RL",
+           "A score-distribution model prices the run line only when quoted.", ("games.scores", "markets.run_line"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_TEAM_TOTAL_001", "Team total", "REG", "poisson_total", "TEAM_TOTAL",
+           "Team-specific run rate forecasts a verified team total.", ("games.scores", "markets.team_total"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_PLAYER_K_001", "Pitcher strikeout prop", "REG", "elo", "PITCHER_PROP",
+           "Pitch-level strikeout expectation is compared with a timestamped prop quote.", ("starting_pitchers", "statcast.pitch_level", "markets.player_props"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_PLAYER_HIT_001", "Batter hit prop", "REG", "elo", "PLAYER_PROP",
+           "Batter opportunity and quality are compared with an observed player prop.", ("lineups", "statcast", "markets.player_props"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_ALT_001", "Alternate-line distribution", "REG", "elo", "ALT_LINE",
+           "A full score distribution is evaluated at alternate prices without cherry-picking.", ("games.scores", "markets.alternate"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_LIVE_001", "Live state update", "REG", "elo", "LIVE",
+           "In-game state updates are paper-tested only from timestamped quotes and events.", ("live.events", "markets.live"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_EXCHANGE_001", "Exchange execution", "REG", "market", "EXCHANGE",
+           "Bid/ask and available size determine executable edge, not a displayed midpoint.", ("markets.exchange.orderbook",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_FUTURES_001", "Futures calibration", "REG", "elo", "FUTURES",
+           "Season futures are evaluated with time-to-settlement and observed liquidity.", ("markets.futures",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_NRFI_001", "No-run first inning", "REG", "elo", "NRFI",
+           "Starter and lineup run probabilities price a verified no-run-first-inning market.", ("starting_pitchers", "lineups", "markets.inning"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_YRFI_001", "Run first inning", "REG", "elo", "YRFI",
+           "A verified first-inning run distribution is compared with the observed price.", ("starting_pitchers", "lineups", "markets.inning"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_INNING_001", "Inning and period markets", "REG", "elo", "INNING",
+           "Period-specific scoring expectations are tested without borrowing full-game outcomes.", ("pitch_level", "markets.inning"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_PREDICTION_001", "Prediction-market execution", "REG", "market", "PREDICTION_MARKET",
+           "Contract probability is compared with observed bid/ask, size, fees and settlement rules.", ("markets.prediction_market",), status="DATA_UNAVAILABLE"),
     ]
+    post: list[Strategy] = [
+        _s("MLB_POST_XREG_001", "Regular-season transfer control", "POST", "xreg", "ML",
+           "Control: apply the regular-season model to postseason without a postseason adjustment.", ("regular_model", "postseason.games")),
+        _s("MLB_POST_ADJUSTED_001", "Regular plus postseason adjustment", "POST", "round_specific", "ML",
+           "A postseason intercept learned only from prior postseason seasons improves transfer.", ("regular_model", "postseason.games")),
+        _s("MLB_POST_HIERARCHICAL_001", "Hierarchical REG plus PO", "POST", "hierarchical", "ML",
+           "Career/multi-year, current season, late season, prior postseason and current series evidence are partially pooled.", ("regular_model", "postseason.games", "series_state")),
+        _s("MLB_POST_SERIESSTATE_001", "Series-state model", "POST", "hierarchical", "ML",
+           "Game number, record, elimination, clinching and games remaining add measurable information only if they do.", ("series_state", "postseason.games"), min_edge=0.03),
+        _s("MLB_POST_PITCHING_001", "Postseason pitching leash", "POST", "hierarchical", "ML",
+           "Shorter leashes, starter workload and pitch mix are tested as postseason-specific features.", ("postseason.pitching",), status="DATA_UNAVAILABLE"),
+        _s("MLB_POST_BULLPEN_001", "Postseason bullpen availability", "POST", "hierarchical", "ML",
+           "High-leverage reliever availability and workload are modeled separately by round.", ("postseason.bullpen",), status="DATA_UNAVAILABLE"),
+        _s("MLB_POST_LINEUP_001", "Postseason lineup construction", "POST", "hierarchical", "ML",
+           "Platoons, pinch hitting and defensive substitutions are measured in postseason only.", ("postseason.lineups",), status="DATA_UNAVAILABLE"),
+        _s("MLB_POST_MANAGER_001", "Postseason managerial decisions", "POST", "hierarchical", "ML",
+           "Managerial hook and substitution patterns are estimated without assuming a direction.", ("postseason.managerial",), status="DATA_UNAVAILABLE"),
+        _s("MLB_POST_MARKET_001", "Postseason market model", "POST", "market", "ML",
+           "Postseason price movement is compared with regular-season market behavior only when observed.", ("postseason.markets",), status="DATA_UNAVAILABLE"),
+    ]
+    for round_code, label in (("WC", "Wild Card"), ("DS", "Division Series"),
+                              ("LCS", "League Championship Series"), ("WS", "World Series")):
+        post.extend([
+            _s(f"MLB_POST_{round_code}_ELO_001", f"{label} round-specific Elo", round_code, "round_specific", "ML",
+               f"Dedicated {label} intercept/parameters learned only from earlier {label} seasons.", ("postseason.games", "regular_model")),
+            _s(f"MLB_POST_{round_code}_HIER_001", f"{label} hierarchical model", round_code, "hierarchical", "ML",
+               f"Partial pooling for {label} prevents overreaction to its small sample.", ("postseason.games", "series_state", "regular_model")),
+            _s(f"MLB_POST_{round_code}_STATE_001", f"{label} series-state model", round_code, "hierarchical", "ML",
+               f"{label} game number, home status and elimination state are evaluated point-in-time.", ("series_state",)),
+            _s(f"MLB_POST_{round_code}_MARKET_001", f"{label} market model", round_code, "market", "ML",
+               f"{label} market efficiency is measured from observed prices, never inferred from outcomes.", ("postseason.markets",), status="DATA_UNAVAILABLE"),
+        ])
+    # Explicitly expose the framework's five permanent experiments as catalog
+    # rows so they can never be accidentally replaced by a single PO model.
+    for exp_id, name, model in (("A", "Model A transfer", "xreg"),
+                                ("B", "Model B adjusted", "round_specific"),
+                                ("C", "Model C dedicated", "hierarchical"),
+                                ("D", "Model D round-specific", "round_specific"),
+                                ("E", "Model E hierarchical", "hierarchical")):
+        post.append(_s(f"MLB_POST_MODEL_{exp_id}_001", name, "POST", model, "ML",
+                       f"Permanent comparison experiment {exp_id}; not declared superior in advance.",
+                       ("postseason.games", "regular_model")))
+    return reg + post
 
 
-def special_rules(sid: str, g, f, ctx, decision) -> dict | None:
-    """Extra decision rules for strategies whose logic is not pure edge."""
+def special_rules(sid: str, g, f, ctx, decision):
+    if decision is None:
+        return None
     if sid == "MLB_REG_FAV_BIAS_001":
-        # Bet the MARKET FAVORITE only when it is a strong favorite
-        # (odds <= -150) AND the model independently agrees it is more likely
-        # to win.  This tests the longshot-bias hypothesis directly.
-        ho = f.get("home_odds", np.nan)
-        ao = f.get("away_odds", np.nan)
-        if pd.isna(ho) or pd.isna(ao):
+        ho, ao = f.get("home_odds"), f.get("away_odds")
+        if not (_num(ho) and _num(ao)):
             return None
-        fav_is_home = ho < ao
-        fav_odds = ho if fav_is_home else ao
-        if fav_odds > ctx["fav_max"]:
+        favorite_home = float(ho) < float(ao)
+        favorite_price = float(ho if favorite_home else ao)
+        if favorite_price > float(ctx.get("fav_max", -150.0)):
             return None
-        # model prob on the favorite side
-        p_home = (decision["p_model"] if decision["selection"] == "HOME"
-                  else 1 - decision["p_model"])
-        p_fav = p_home if fav_is_home else 1 - p_home
-        if p_fav < 0.5 + 0.02:  # model must agree the favorite is favored
+        selection = "HOME" if favorite_home else "AWAY"
+        p = decision["p_model"] if selection == decision["selection"] else 1.0 - decision["p_model"]
+        return {**decision, "selection": selection, "p_model": p,
+                "fair_price": p, "required_price": prob_to_am(p)}
+    if sid == "MLB_POST_SERIESSTATE_001" or sid.endswith("_STATE_001"):
+        if not (f.get("elimination_a") or f.get("elimination_b") or
+                f.get("clinch_a") or f.get("clinch_b")):
             return None
-        sel = "HOME" if fav_is_home else "AWAY"
-        from ..config import am_to_prob, devig_two
-        ph, pa = devig_two(am_to_prob(ho), am_to_prob(ao))
-        p_mkt_fav = ph if fav_is_home else pa
-        return {"selection": sel, "p_model": p_fav, "fair_price": p_fav,
-                "market": "ML", "edge": p_fav - p_mkt_fav, "p_market": p_mkt_fav}
-    if sid == "MLB_POST_SERIESSTATE_001":
-        # only play elimination or clinching games
-        elim = (f.get("elimination_a", 0) == 1) or (f.get("elimination_b", 0) == 1)
-        clin = (f.get("clinch_a", 0) == 1) or (f.get("clinch_b", 0) == 1)
-        if not (elim or clin):
-            return None
-        return decision
     return decision
+
+
+if __name__ == "__main__":
+    import json
+    print(json.dumps([s.to_record() for s in build_catalog()], indent=2, default=str))
