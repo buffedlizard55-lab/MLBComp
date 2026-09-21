@@ -3,7 +3,7 @@
     "name": "game_pk_unique",
     "category": "games",
     "passed": true,
-    "details": "no source-backed game snapshot loaded; gate is ready"
+    "details": "source-backed games=28072, duplicate game_pk=0"
   },
   {
     "name": "issue_queue_available",
@@ -51,7 +51,7 @@
     "name": "prediction_cutoff_present",
     "category": "predictions",
     "passed": true,
-    "details": "predictions=0, missing data_cutoff_time=0"
+    "details": "predictions=144098, missing data_cutoff_time=0"
   },
   {
     "name": "quote_availability_gate",
@@ -75,13 +75,13 @@
     "name": "score_integrity",
     "category": "games",
     "passed": true,
-    "details": "no completed game rows loaded; no score is asserted"
+    "details": "completed rows=27972, invalid/non-negative score failures=0"
   },
   {
     "name": "series_state_pre_game",
     "category": "series_state",
     "passed": true,
-    "details": "state rows=0, invalid pre-game counters=0"
+    "details": "state rows=440, invalid pre-game counters=0"
   },
   {
     "name": "source_registry_fields",
@@ -105,6 +105,6 @@
     "name": "winner_integrity",
     "category": "games",
     "passed": true,
-    "details": "no completed game rows loaded; no winner is asserted"
+    "details": "winner/score mismatches=0"
   }
 ]

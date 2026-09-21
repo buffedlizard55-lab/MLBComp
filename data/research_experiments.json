@@ -2,235 +2,277 @@
   {
     "id": "Q01",
     "title": "Q01",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "status": "REQUIRES_REPLICATION",
+    "sample_size": 440,
+    "findings": {
+      "delta": -0.7848434218694287,
+      "post_mean_total": 8.209090909090909,
+      "post_n": 440,
+      "reg_mean_total": 8.993934330960338,
+      "reg_n": 27532
+    },
+    "conclusion": "Observed run totals only; this is descriptive and requires multi-season replication.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q02",
     "title": "Q02",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "status": "REQUIRES_REPLICATION",
+    "sample_size": 440,
+    "findings": {
+      "delta": -0.2919355885935824,
+      "post_margin_std": 4.199113397333954,
+      "reg_margin_std": 4.491048985927536
+    },
+    "conclusion": "Observed run margins only; not a market-edge claim.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q03",
     "title": "Q03",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "status": "INCONCLUSIVE",
+    "sample_size": 440,
+    "findings": {
+      "delta": 0.0034927951606725793,
+      "post_home_win_rate": 0.5363636363636364,
+      "reg_home_win_rate": 0.5328708412029638
+    },
+    "conclusion": "Home-win frequency is descriptive; no causal postseason assumption is made.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q04",
     "title": "Q04",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q05",
     "title": "Q05",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q06",
     "title": "Q06",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q07",
     "title": "Q07",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q08",
     "title": "Q08",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q09",
     "title": "Q09",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
-    "env": "POST",
+    "status": "INCONCLUSIVE",
+    "sample_size": 25558,
+    "findings": {
+      "delta": 0.09645432399571058,
+      "elo_brier": 0.25904476709250995,
+      "elo_n": 27532,
+      "lateform_brier": 0.35549909108822053,
+      "lateform_n": 25558
+    },
+    "conclusion": "Late-season Brier vs Elo baseline; delta measured point-in-time, not a market edge.",
+    "env": "REG",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q10",
     "title": "Q10",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "status": "INCONCLUSIVE",
+    "sample_size": 440,
+    "findings": {
+      "delta": 0.0017857142857142794,
+      "elim_n": 160,
+      "elimination_home_win_rate": 0.5375,
+      "non_elim_home_win_rate": 0.5357142857142857,
+      "non_elim_n": 280
+    },
+    "conclusion": "Elimination vs non-elimination home win rate (descriptive, not causal; Elo not yet partialled).",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q11",
     "title": "Q11",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "status": "EVALUATED",
+    "sample_size": 440,
+    "findings": {
+      "clinch_games": 160,
+      "elimination_games": 160,
+      "post_n": 440
+    },
+    "conclusion": "Counts of clinching/elimination games; win-rate effects in Q10.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q12",
     "title": "Q12",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q13",
     "title": "Q13",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "status": "INCONCLUSIVE",
+    "sample_size": 440,
+    "findings": {
+      "delta": -0.1361748089066135,
+      "home_loss_rest_diff_mean": 0.09803921568627451,
+      "home_win_rest_diff_mean": -0.038135593220338986
+    },
+    "conclusion": "Rest difference vs home win (descriptive).",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q14",
     "title": "Q14",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q15",
     "title": "Q15",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q16",
     "title": "Q16",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q17",
     "title": "Q17",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q18",
     "title": "Q18",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "POST",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q19",
     "title": "Q19",
     "status": "DATA_UNAVAILABLE",
     "sample_size": 0,
-    "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "findings": {
+      "verified_quote_rows": 0
+    },
+    "conclusion": "Historical market coverage is counted from verified quote records only.",
     "env": "ALL",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "market_quotes.source_observation_id; no quote is inferred."
   },
   {
     "id": "Q20",
     "title": "Q20",
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Not run: source data required by this question is unavailable.",
+    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
     "env": "ALL",
     "round_code": null,
-    "provenance": "No source-backed feature snapshot is available in this checkout."
+    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "EXP_A",
     "title": "Model A \u2014 regular-season transfer",
-    "status": "NOT_RUN",
-    "sample_size": 0,
+    "status": "EVALUATED",
+    "sample_size": 440,
     "findings": {
-      "n": 0,
-      "status": "NOT_RUN",
-      "strategy_id": "MLB_POST_XREG_001"
+      "brier": 0.24936072954902402,
+      "log_loss": 0.69211412752737,
+      "n": 440,
+      "status": "EVALUATED",
+      "strategy_id": "MLB_POST_XREG_001",
+      "verified_n": 0,
+      "verified_pnl": null,
+      "verified_roi": null,
+      "win_rate": 0.5477272727272727
     },
-    "brier": null,
-    "log_loss": null,
+    "brier": 0.24936072954902402,
+    "log_loss": 0.69211412752737,
     "roi": null,
     "env": "POST",
     "round_code": null,
@@ -240,15 +282,21 @@
   {
     "id": "EXP_B",
     "title": "Model B \u2014 regular season plus postseason adjustment",
-    "status": "NOT_RUN",
-    "sample_size": 0,
+    "status": "EVALUATED",
+    "sample_size": 440,
     "findings": {
-      "n": 0,
-      "status": "NOT_RUN",
-      "strategy_id": "MLB_POST_ADJUSTED_001"
+      "brier": 0.25492997383294524,
+      "log_loss": 0.7033925586498165,
+      "n": 440,
+      "status": "EVALUATED",
+      "strategy_id": "MLB_POST_ADJUSTED_001",
+      "verified_n": 0,
+      "verified_pnl": null,
+      "verified_roi": null,
+      "win_rate": 0.5022727272727273
     },
-    "brier": null,
-    "log_loss": null,
+    "brier": 0.25492997383294524,
+    "log_loss": 0.7033925586498165,
     "roi": null,
     "env": "POST",
     "round_code": null,
@@ -258,15 +306,21 @@
   {
     "id": "EXP_C",
     "title": "Model C \u2014 dedicated postseason/series state",
-    "status": "NOT_RUN",
-    "sample_size": 0,
+    "status": "EVALUATED",
+    "sample_size": 128,
     "findings": {
-      "n": 0,
-      "status": "NOT_RUN",
-      "strategy_id": "MLB_POST_SERIESSTATE_001"
+      "brier": 0.25740655164186155,
+      "log_loss": 0.7161662328414714,
+      "n": 128,
+      "status": "EVALUATED",
+      "strategy_id": "MLB_POST_SERIESSTATE_001",
+      "verified_n": 0,
+      "verified_pnl": null,
+      "verified_roi": null,
+      "win_rate": 0.5390625
     },
-    "brier": null,
-    "log_loss": null,
+    "brier": 0.25740655164186155,
+    "log_loss": 0.7161662328414714,
     "roi": null,
     "env": "POST",
     "round_code": null,
@@ -276,20 +330,26 @@
   {
     "id": "EXP_D",
     "title": "Model D \u2014 round-specific models",
-    "status": "NOT_RUN",
-    "sample_size": 0,
+    "status": "EVALUATED",
+    "sample_size": 440,
     "findings": {
-      "n": 0,
-      "status": "NOT_RUN",
+      "brier": 0.25492997383294524,
+      "log_loss": 0.7033925586498165,
+      "n": 440,
+      "status": "EVALUATED",
       "strategy_ids": [
         "MLB_POST_WC_ELO_001",
         "MLB_POST_DS_ELO_001",
         "MLB_POST_LCS_ELO_001",
         "MLB_POST_WS_ELO_001"
-      ]
+      ],
+      "verified_n": 0,
+      "verified_pnl": null,
+      "verified_roi": null,
+      "win_rate": 0.5022727272727273
     },
-    "brier": null,
-    "log_loss": null,
+    "brier": 0.25492997383294524,
+    "log_loss": 0.7033925586498165,
     "roi": null,
     "env": "POST",
     "round_code": null,
@@ -299,15 +359,21 @@
   {
     "id": "EXP_E",
     "title": "Model E \u2014 hierarchical partial pooling",
-    "status": "NOT_RUN",
-    "sample_size": 0,
+    "status": "EVALUATED",
+    "sample_size": 440,
     "findings": {
-      "n": 0,
-      "status": "NOT_RUN",
-      "strategy_id": "MLB_POST_HIERARCHICAL_001"
+      "brier": 0.25643123525484146,
+      "log_loss": 0.7102830262620053,
+      "n": 440,
+      "status": "EVALUATED",
+      "strategy_id": "MLB_POST_HIERARCHICAL_001",
+      "verified_n": 0,
+      "verified_pnl": null,
+      "verified_roi": null,
+      "win_rate": 0.5431818181818182
     },
-    "brier": null,
-    "log_loss": null,
+    "brier": 0.25643123525484146,
+    "log_loss": 0.7102830262620053,
     "roi": null,
     "env": "POST",
     "round_code": null,
