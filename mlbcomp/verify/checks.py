@@ -100,70 +100,62 @@ def run_checks() -> dict:
            f"all {len(odds)} odds rows matched game_pk with identical date+teams "
            f"(after WSH->WAS, OAK->ATH rename crosswalk)")
 
-    # 8. WS champions vs independently known champions — checked on the
-    # VERIFIED corpus (P1 2025 + P2 reconstructed 2019-2024), which is what
-    # the backtest actually uses.  The mirror's own 2016/2021/2023/2024 WS
-    # rows are fabricated and are NOT part of the verified corpus.
-    champ_bad = []
-    po_corpus_path = FEAT / "po_corpus.parquet"
-    if po_corpus_path.exists():
-        pc = pd.read_parquet(po_corpus_path)
-        ws = pc[pc.round_code == "WS"]
-        for y, sub in ws.groupby("season"):
-            sub = sub.sort_values("game_date")
-            last_winner_id = int(sub.winner_team_id.iloc[-1])
-            trow = teams[teams.team_id == last_winner_id]
-            ch = trow.abbr.iloc[0] if len(trow) else "?"
-            known = KNOWN_WS_CHAMPIONS.get(y)
-            if known and ch != known:
-                champ_bad.append(f"{y}: corpus={ch} known={known}")
-    else:
-        champ_bad.append("po_corpus.parquet missing (run build_po_corpus)")
-    _check(conn, "ws_champions_verified", "postseason", not champ_bad,
-           "; ".join(champ_bad) if champ_bad else
-           "Verified-corpus WS champions 2019-2025 all match known results "
-           "(2019 WAS, 2020 TB, 2021 HOU, 2022 HOU, 2023 LAD, 2024 NYY, 2025 LAD)")
-
-    # 8b. Detect & document the mirror's fabricated WS seasons (these are
-    # quarantined by design; the check PASSES by recording the detection).
-    mirror_ws_bad = []
-    ws_m = g[(g.round_code == "WS") & g.completed]
+    # 8. WS champions: the MIRROR (the actual data source, and what the
+    # backtest settles on) must reproduce the independently documented
+    # champions.  A mismatch is a FAILURE.  (This check previously ran only
+    # against a hand-reconstructed corpus and passed by construction; the
+    # reconstruction it validated contained invented series results.)
     id2abbr = dict(zip(teams.team_id, teams.abbr))
-    for y, sub in ws_m.groupby("season"):
+    champ_bad, champ_ok = [], []
+    ws_m = g[(g.round_code == "WS") & g.completed & g.winner_team_id.notna()]
+    for y in sorted(KNOWN_WS_CHAMPIONS):
+        sub = ws_m[ws_m.season == y]
+        if not len(sub):
+            champ_bad.append(f"{y}: no settled WS games in mirror")
+            continue
         final = sub.sort_values(["game_date", "game_pk"]).iloc[-1]
         ch = id2abbr.get(int(final.winner_team_id), "?")
-        known = KNOWN_WS_CHAMPIONS.get(y)
-        if known and ch != known:
-            mirror_ws_bad.append(f"{y}: mirror={ch} known={known}")
-    # mirror structural violations (fabricated series break best-of-N / clinch
-    # logic) — detected and documented, quarantined by design
+        known = KNOWN_WS_CHAMPIONS[y]
+        (champ_ok if ch == known else champ_bad).append(f"{y}:{ch}")
+    _check(conn, "ws_champions_verified", "postseason", not champ_bad,
+           "; ".join(champ_bad) if champ_bad else
+           "mirror WS champions match the independently documented list for "
+           f"all {len(champ_ok)} seasons 2015-2025 ("
+           + ", ".join(champ_ok) + ")")
+    results["ws_champions_ok"] = len(champ_ok)
+
+    # 8b. Postseason authenticity / structural integrity of the source that
+    # is actually used.  Reports real findings and FAILS on real violations
+    # (it no longer "passes by recording a quarantine").
     mirror_fmt_bad, mirror_clinch_bad = [], []
-    try:
-        series = pd.read_sql("SELECT * FROM series", conn)
-        for _, s in series.iterrows():
-            maxg = 2 * s.needed_a - 1
-            n = int((g.series_key == s.series_key).sum())
-            if n > maxg:
-                mirror_fmt_bad.append(f"{s.series_key}({n}g)")
-        stt = pd.read_sql("SELECT * FROM series_state", conn)
-        srt = pd.read_sql("SELECT series_key, needed_a FROM series",
-                          conn).set_index("series_key")
-        stt["needed"] = stt.series_key.map(srt["needed_a"]).fillna(4).astype(int)
-        for skey, sub in stt.groupby("series_key"):
-            sub = sub.sort_values(["game_number"])
-            nd = int(sub.needed.iloc[0])
-            if (sub.wins_a_before >= nd).any() or (sub.wins_b_before >= nd).any():
-                mirror_clinch_bad.append(skey)
-    except Exception:
-        pass
-    _check(conn, "mirror_po_fabrication_quarantined", "postseason", True,
-           f"QUARANTINED (detected, never used in backtests): "
-           f"WS seasons contradicting known champions="
-           f"{', '.join(mirror_ws_bad) if mirror_ws_bad else 'none'}; "
+    series = pd.read_sql("SELECT * FROM series", conn)
+    for _, s in series.iterrows():
+        maxg = 2 * s.needed_a - 1
+        n = int((g.series_key == s.series_key).sum())
+        if n > maxg:
+            mirror_fmt_bad.append(f"{s.series_key}({n}g>{maxg})")
+    stt = pd.read_sql("SELECT * FROM series_state", conn)
+    srt = pd.read_sql("SELECT series_key, needed_a FROM series",
+                      conn).set_index("series_key")
+    stt["needed"] = stt.series_key.map(srt["needed_a"]).fillna(4).astype(int)
+    for skey, sub in stt.groupby("series_key"):
+        sub = sub.sort_values(["game_number"])
+        nd = int(sub.needed.iloc[0])
+        if (sub.wins_a_before >= nd).any() or (sub.wins_b_before >= nd).any():
+            mirror_clinch_bad.append(skey)
+    # games the source marks Final but carries no score: unsettled by design.
+    null_final = int(((g.round_code.notna()) & (~g.completed)).sum())
+    _check(conn, "mirror_po_structural_integrity", "postseason",
+           not mirror_fmt_bad and not mirror_clinch_bad,
+           f"{int(g.round_code.notna().sum())} mirror PO games 2015-2026; "
            f"best-of-N length violations={len(mirror_fmt_bad)} "
-           f"({', '.join(mirror_fmt_bad[:6])}{'...' if len(mirror_fmt_bad) > 6 else ''}); "
-           f"play-after-clinch series={len(mirror_clinch_bad)}. "
-           f"Backtests use the verified corpus instead; see source_registry.")
+           f"({', '.join(mirror_fmt_bad[:6])}); "
+           f"play-after-clinch series={len(mirror_clinch_bad)} "
+           f"({', '.join(mirror_clinch_bad[:6])}); "
+           f"{null_final} PO rows marked Final with no score are left unsettled "
+           f"(e.g. the rain-suspended 2022 WS Game 3, which the mirror carries "
+           f"as a separate scoreless row — cross-checked against the 2022 WS "
+           f"game log: PHI 7-0 HOU on Nov 1 is Game 3's completion).")
 
     # 9/11. Series structure (format length + no play after clinch) checked
     # on the VERIFIED CORPUS (what the backtest uses), not the raw mirror.
@@ -171,7 +163,7 @@ def run_checks() -> dict:
         if rnd == "WC":
             return 1 if yr in (2012, 2015) else 2
         if rnd == "DS":
-            return 2 if yr == 2020 else 3
+            return 3   # best-of-5 every season, incl. 2020 (see round_needed)
         return 4
     pc_path = FEAT / "po_corpus.parquet"
     n_series_verified = 0

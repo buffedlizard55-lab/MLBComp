@@ -1,3 +1,19 @@
+"""RETIRED 2026-09-21 — DO NOT RUN.  Kept only as an audit artefact.
+
+This script fabricated the competition.  It used random.uniform / random.choice
+to invent moneylines, totals, probable starters, model probabilities, edges,
+CLV, win/loss results, "actual scores", bankroll paths and Kalshi
+bid/ask/liquidity/fills, then stamped every record
+"verification_status": "VERIFIED_PRIMARY".  Its summary totals did not even
+match the files it wrote (89,452 bets claimed vs 1,200 written; 12,480 Kalshi
+trades claimed vs 120 written).
+
+Running it would overwrite data/*.json with invented results.  The only writer
+of data/*.json is now mlbcomp/web/export_static.py, which reads data/mlbcomp.db.
+
+Evidence retained in docs/AUDIT_2026-09-21.md and in the issue queue
+(irregularities.json / IRR-001).
+"""
 """
 Complete generator for all MLBComp competition data files.
 Ensures 100% mathematical precision and zero hallucinations.

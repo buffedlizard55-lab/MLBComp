@@ -11,12 +11,25 @@ S2  cesar-dx/mlb-betting-ml (github.com)
     2025 regular season; the 2021 file ends 2021-09-27).  No verified
     postseason prices exist in this environment.
 
-IMPORTANT (verified by line-by-line audit, 2026-09-20):
-    The S1 mirror's POSTSEASON is partially fabricated (2016, 2021, 2023,
-    2024 heavily; 2015, 2019, 2020, 2022 partially).  The system therefore
-    uses a verified postseason corpus (po_corpus.parquet): 2025 from the
-    mirror (reality spot-checked) + 2019-2024 game winners reconstructed
-    from documented public results (mlbcomp/data_recon/po_results.py).
+POSTSEASON AUTHENTICITY (re-audited 2026-09-21 — supersedes the 2026-09-20
+claim that the mirror's postseason was "partially fabricated"):
+    The S1 mirror's postseason is AUTHENTIC.  Its World Series rows for all
+    eleven seasons 2015-2025 reproduce the independently documented champions
+    and series lengths exactly (2015 KC 4-1 NYM, 2016 CHC 4-3 CLE, 2017 HOU
+    4-3 LAD, 2018 BOS 4-1 LAD, 2019 WAS 4-3 HOU, 2020 LAD 4-2 TB, 2021 ATL
+    4-2 HOU, 2022 HOU 4-2 PHI, 2023 TEX 4-1 ARI, 2024 LAD 4-1 NYY, 2025 LAD
+    4-3 TOR).  The earlier "fabrication" finding was an artefact of a wrong
+    KNOWN_WS_CHAMPIONS table in this file (5 of 11 champions were wrong),
+    not a property of the source.  KNOWN_WS_CHAMPIONS is now correct and
+    verify/checks.py fails loudly on any mismatch instead of quarantining.
+    The mirror's real postseason scores (502 games, 2015-2026) are therefore
+    used directly; see features/po_corpus.py.
+
+    Known source quirks that ARE real and are handled, not quarantined:
+      * 2022 WS Game 3 (2022-10-31) was rain-suspended and completed the next
+        day; the mirror carries a Final row with null scores.  Rows with a
+        null score are treated as unsettled (never scored), and the series is
+        still reconstructed correctly from the remaining games.
 
 Rejected / unavailable (flagged per spec §35 — no invented data):
 R1  statsapi.mlb.com (MLB Stats API) — network-blocked in this environment.
@@ -76,13 +89,24 @@ CANON_ABBR_TO_ID = {abbr: i + 1 for i, abbr in enumerate(sorted(ABBREV_TO_LEAGUE
 TEAM_ID_TO_ABBR = {tid: abbr for abbr, tid in CANON_ABBR_TO_ID.items()}
 TEAM_ID_TO_NAME: dict[int, str] = {}  # filled with latest display name per team
 
-# Known World Series champions 2015-2025 — independent cross-check of the
-# ingested postseason brackets (spec: verify important information line-by-line).
-# Independently known World Series champions (public record).
+# Independently documented World Series champions 2015-2025 (public record).
+# Cross-checked 2026-09-21 against four independent public listings
+# (mlbschedule.net, baseballnewsplus.com, surprisesports.com,
+# baseballstandard.com) which agree on every season listed here.  These are
+# used ONLY as an external cross-check of the ingested mirror; the mirror is
+# the data source.  A mismatch is a hard verification FAILURE.
 KNOWN_WS_CHAMPIONS = {
-    2015: "KC", 2016: "LAD", 2017: "HOU", 2018: "BOS", 2019: "WAS",
-    2020: "TB", 2021: "HOU", 2022: "HOU", 2023: "LAD", 2024: "NYY",
-    2025: "LAD",
+    2015: "KC",   # Royals over Mets 4-1
+    2016: "CHC",  # Cubs over Indians 4-3
+    2017: "HOU",  # Astros over Dodgers 4-3
+    2018: "BOS",  # Red Sox over Dodgers 4-1
+    2019: "WAS",  # Nationals over Astros 4-3
+    2020: "LAD",  # Dodgers over Rays 4-2
+    2021: "ATL",  # Braves over Astros 4-2
+    2022: "HOU",  # Astros over Phillies 4-2
+    2023: "TEX",  # Rangers over Diamondbacks 4-1
+    2024: "LAD",  # Dodgers over Yankees 4-1
+    2025: "LAD",  # Dodgers over Blue Jays 4-3
 }
 
 # City-level venue coordinates (±50km immaterial for travel research).
@@ -130,12 +154,15 @@ def register_sources(conn) -> None:
          "MLB schedule + play-by-play parquet, 1988-2026 (2026 live through 2026-09-20)",
          "games, scores, venues, series, at-bats, pitchers, batters", 1, None,
          db.utcnow(),
-         "sparse-cloned into data/raw/baseballr. REGULAR SEASON 2015-2026 trusted "
-         "(2019-2025 independently cross-verified via S2: 15,442/15,442 date+team "
-         "matches, 100% outcome agreement). POSTSEASON 2016-2024 partially "
-         "FABRICATED (e.g. a '2016 WS' Cubs-Indians game on 2016-10-25 that never "
-         "occurred; 2020/2021/2024 WS results flipped). Verified PO corpus = 2025 "
-         "(reality spot-checked) + reconstructed 2019-2024 winners (po_corpus)."),
+         "fetched per-season via api.github.com git-blobs into data/raw/baseballr "
+         "(blob SHAs recorded in data/raw/FETCH_MANIFEST.json). REGULAR SEASON "
+         "2015-2026 trusted (2019-2025 independently cross-verified via S2: "
+         "date+team join with zero mismatches and 100% outcome agreement). "
+         "POSTSEASON 2015-2025 also trusted: its World Series rows reproduce all "
+         "11 independently documented champions and series lengths exactly "
+         "(see KNOWN_WS_CHAMPIONS). The 2026-09-20 claim that this source's "
+         "postseason was fabricated was wrong — it was caused by an incorrect "
+         "champion table, not by the data."),
         ("S2_cesar_odds", "https://github.com/cesar-dx/mlb-betting-ml",
          "Real moneyline odds (American) + outcomes + statcast form features",
          "2019-2025 REGULAR SEASON ONLY (verified: 2021 file ends 2021-09-27; "
@@ -148,10 +175,11 @@ def register_sources(conn) -> None:
          "Per-game MLB Stats API responses (json.gz), 1988-2026",
          "440 postseason dumps fetched by game_pk into data/raw/statsapi", 0,
          "NOT an independent source: same mirror family as S1; all 440 dumps "
-         "carry null scores; '2016 WS' dump shows a never-occurred game; "
-         "authenticity of metadata unproven", db.utcnow(),
-         "dates/teams match S1 schedule for all 440 pks (useful corroboration "
-         "of S1's structure only); NOT used for settlement or verification."),
+         "carry null scores, so they corroborate dates/teams only", db.utcnow(),
+         "dates/teams match S1 schedule for all 440 pks. NOTE: the earlier claim "
+         "that a '2016 WS' dump showed a game that never occurred was wrong — "
+         "2016-10-25 Cubs@Indians was World Series Game 1 and did occur. "
+         "Still not used for settlement (null scores)."),
         ("R1_statsapi", "https://statsapi.mlb.com",
          "MLB Stats API (live boxscores, weather, lineups)", "—", 0,
          "network-blocked in this environment", db.utcnow(),
@@ -280,14 +308,18 @@ def build_games(games: pd.DataFrame, pbp: pd.DataFrame) -> pd.DataFrame:
 def round_needed(round_code: str, season: int) -> int:
     """Wins needed to clinch a series (format changes by year).
 
-    WC: single-elimination game in 2012/2015; best-of-2 in 2020; best-of-3
-    otherwise (2 wins). DS: best-of-5 (3 wins) in all years except 2020
-    (bubble: best-of-3, 2 wins). LCS/WS: best-of-7 (4 wins).
+    WC: single-elimination game in 2012/2015 (1 win); best-of-3 in 2020 and
+    from 2022 on (2 wins).
+    DS: best-of-5 (3 wins) in EVERY season here, including 2020.  The 2020
+    expanded format lengthened the WILD CARD round to best-of-three but left
+    the Division Series at its normal best-of-five (MLB's own 2020-07-23
+    announcement: "Division Series (best-of-five ... at neutral sites)").
+    LCS/WS: best-of-7 (4 wins).
     """
     if round_code == "WC":
         return 1 if season in (2012, 2015) else 2
     if round_code == "DS":
-        return 2 if season == 2020 else 3
+        return 3
     return 4  # LCS / WS
 
 
