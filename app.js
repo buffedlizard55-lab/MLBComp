@@ -1,7 +1,8 @@
 /* MLBComp static competition client.  It renders committed JSON projections only. */
-const DATA_FILES = ['summary','leaderboard','strategies','upcoming_bets','open_positions','bets_ledger','research_experiments','registry','audit_checks','irregularities','kalshi_trades','players'];
+const DATA_FILES = ['summary','leaderboard','strategies','upcoming_bets','open_positions','bets_ledger','research_experiments','registry','audit_checks','irregularities','kalshi_trades','players','competitions','competitors'];
 const PAGE_SIZE = 50;
-const S = {data:{}, tab:'dashboard', historyPage:1, upcomingPage:1, filtersBound:false};
+const S = {data:{}, tab:'dashboard', historyPage:1, upcomingPage:1, filtersBound:false,
+           leaderView:'competitions', compId:null, compUser:null, entrantUser:null, entrantDetail:null};
 const $ = (q, root=document) => (typeof q === 'string' && q.startsWith('#') ? (root.getElementById ? root.getElementById(q.slice(1)) : root.querySelector(q)) : root.querySelector(q));
 const $$ = (q, root=document) => [...root.querySelectorAll(q)];
 const el = id => document.getElementById(id);
@@ -15,6 +16,76 @@ const fmtMoney = v => v == null || v === '' ? '—' : `${Number(v) < 0 ? '−' :
 const unique = values => [...new Set(values.filter(v => v != null && v !== ''))].sort();
 const ROUND_LABEL = {WC:'Wild Card',DS:'Division Series',LCS:'League Championship Series',WS:'World Series',POST:'Postseason',REG:'Regular season'};
 
+/* Timestamps render to the second in UTC wherever one exists on a record. */
+const fmtTS = value => {
+  if (value == null || value === '') return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return h(value);
+  return parsed.toISOString().replace('T',' ').replace(/\.\d{3}Z$/, 'Z');
+};
+const dayOf = value => (value == null ? '' : String(value).slice(0,10));
+
+/* Official review endpoints for manual verification keyed by game_pk. */
+function betReviewLinks(row) {
+  const pk = row.game_pk;
+  const links = [];
+  if (pk != null && pk !== '') {
+    links.push({label: 'MLB Stats API · live game feed (official, play timestamps to the second)', url: `https://statsapi.mlb.com/api/v1.1/game/${encodeURIComponent(pk)}/feed/live`});
+    links.push({label: 'MLB Stats API · box score (official)', url: `https://statsapi.mlb.com/api/v1/game/${encodeURIComponent(pk)}/boxscore`});
+    links.push({label: 'MLB Gameday (official)', url: `https://www.mlb.com/gameday/${encodeURIComponent(pk)}`});
+  }
+  const gd = dayOf(row.game_date);
+  if (gd) links.push({label: `MLB Stats API · schedule for ${gd} (official)`, url: `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${encodeURIComponent(gd)}&hydrate=linescore`});
+  if (row.quote_source_url) {
+    links.push({label: `Price source observation (${h(row.quote_source_id || 'quote')})`, url: row.quote_source_url});
+  }
+  return links;
+}
+function reviewButton(row) {
+  const key = row.bet_id != null ? `bet:${row.bet_id}` : (row.prediction_id ? `pred:${row.prediction_id}` : null);
+  if (!key) return '<span class="muted">—</span>';
+  return `<button class="text-button review-link" data-review="${h(key)}">Review ↗</button>`;
+}
+
+/* ---- competition mirrors: same arithmetic as mlbcomp.engine.competition ---- */
+function sliceMatches(row, slice) {
+  if (String(row.strategy_id) !== String(slice.strategy_id)) return false;
+  if (slice.side && !String(row.selection || '').toUpperCase().startsWith(slice.side)) return false;
+  if (slice.seasons && slice.seasons.length && !slice.seasons.includes(Number(row.season))) return false;
+  if (slice.min_prob != null && !(Number.isFinite(Number(row.model_prob)) && Number(row.model_prob) >= slice.min_prob)) return false;
+  if (slice.max_prob != null && Number.isFinite(Number(row.model_prob)) && Number(row.model_prob) >= slice.max_prob) return false;
+  if (slice.rounds && slice.rounds.length && !slice.rounds.includes(String(row.round_code || row.env))) return false;
+  return true;
+}
+function competitionScopes(row) {
+  const scopes = new Set();
+  if (row.round_code) { scopes.add(String(row.round_code)); scopes.add('POST'); }
+  if (row.env) {
+    scopes.add(String(row.env));
+    if (['WC','DS','LCS','WS'].includes(String(row.env))) scopes.add('POST');
+  }
+  return scopes;
+}
+function rowInScope(row, scope) {
+  if (scope === 'REG') return String(row.env) === 'REG' && !row.round_code;
+  return competitionScopes(row).has(scope);
+}
+function scoreSummary(rows) {
+  const scored = rows.filter(r => ['W','L','P'].includes(r.result));
+  const decided = scored.filter(r => r.result !== 'P');
+  const wins = decided.filter(r => r.result === 'W').length;
+  const brierRows = scored.filter(r => Number.isFinite(Number(r.model_prob)));
+  const brier = brierRows.length ? brierRows.reduce((s,r) => s + (Math.min(Math.max(Number(r.model_prob),1e-15),1-1e-15) - (r.result==='W'?1:r.result==='L'?0:0.5))**2, 0) / brierRows.length : null;
+  const verified = scored.filter(r => r.verification_status === 'VERIFIED_PRICE');
+  return {
+    picks: scored.length, wins, losses: decided.length - wins,
+    pushes: scored.length - decided.length,
+    accuracy: decided.length ? wins / decided.length : null,
+    brier, verified_price_rows: verified.length,
+    pnl: verified.length ? verified.reduce((s,r) => s + Number(r.pnl || 0), 0) : null,
+  };
+}
+
 async function loadData() {
   const responses = await Promise.all(DATA_FILES.map(async key => {
     try { const r = await fetch(`data/${key}.json`, {cache:'no-store'}); return [key, r.ok ? await r.json() : []]; }
@@ -24,20 +95,26 @@ async function loadData() {
   renderAll();
 }
 
+function applyHashRoute() {
+  const hash = location.hash.slice(1);
+  if (hash.startsWith('strategy/')) { go('strategies', false); openStrategy(decodeURIComponent(hash.slice(9))); return; }
+  if (hash.startsWith('bet/')) { openBet(decodeURIComponent(hash.slice(4)), {fromHash:true}); return; }
+  if (hash.startsWith('competition/')) {
+    go('leaderboard', false); setLeaderView('competitions', false);
+    selectCompetition(decodeURIComponent(hash.slice(12)), {fromHash:true}); return;
+  }
+  if (hash.startsWith('entrant/')) {
+    go('leaderboard', false); setLeaderView('entrants', false);
+    selectEntrant(decodeURIComponent(hash.slice(8)), {fromHash:true}); return;
+  }
+  if (document.getElementById(`view-${hash}`)) go(hash, false);
+}
 function initTabs() {
   $$('.tabs button').forEach(button => button.addEventListener('click', () => go(button.dataset.tab)));
   $$('[data-go]').forEach(button => button.addEventListener('click', () => go(button.dataset.go)));
-  const hash = location.hash.slice(1);
-  if (hash.startsWith('strategy/')) {
-    go('strategies', false);
-  } else if (document.getElementById(`view-${hash}`)) {
-    go(hash, false);
-  }
-  addEventListener('hashchange', () => {
-    const tab = location.hash.slice(1);
-    if (tab.startsWith('strategy/')) { go('strategies', false); openStrategy(decodeURIComponent(tab.slice(9))); return; }
-    if (document.getElementById(`view-${tab}`)) go(tab, false);
-  });
+  $$('#leader-segmented button').forEach(button => button.addEventListener('click', () => setLeaderView(button.dataset.lview)));
+  applyHashRoute();
+  addEventListener('hashchange', applyHashRoute);
 }
 function go(tab, updateHash=true) {
   if (!document.getElementById(`view-${tab}`)) return;
@@ -61,6 +138,8 @@ function renderAll() {
   const footer = el('footer-meta'); if (footer) footer.textContent = `${fmtN(m.total_strategies)} strategy versions · ${fmtN(m.total_simulated_bets)} wager records · ${h(m.as_of_date || '')}`;
   bindFilters();
   renderDashboard();
+  renderCompetitions();
+  renderEntrants();
   renderLeaderboard();
   renderPostseason();
   renderStrategies();
@@ -73,6 +152,7 @@ function renderAll() {
   renderVerification();
   const hash = location.hash.slice(1);
   if (hash.startsWith('strategy/')) openStrategy(decodeURIComponent(hash.slice(9)));
+  else if (hash.startsWith('bet/') || hash.startsWith('competition/') || hash.startsWith('entrant/')) applyHashRoute();
 }
 
 function renderDashboard() {
@@ -128,10 +208,14 @@ function fillSelect(id, values, allLabel='All') {
 }
 function bindFilters() {
   if (S.filtersBound) return;
-  const ids = ['leader-env','leader-round','leader-market','leader-model','leader-alias','strategy-env','strategy-status','strategy-market','strategy-model','upcoming-env','upcoming-round','history-env','history-status','history-season','history-team','history-model','source-status','analytics-env'];
-  ids.forEach(id => { const node=el(id); if(node) node.addEventListener('change', () => { S.historyPage=1; S.upcomingPage=1; renderAll(); }); });
-  ['leader-search','strategy-search','history-search','upcoming-search','history-game','history-player'].forEach(id => {
+  const ids = ['leader-env','leader-round','leader-market','leader-model','leader-alias','strategy-env','strategy-status','strategy-market','strategy-model','upcoming-env','upcoming-round','history-env','history-status','history-season','history-team','history-model','source-status','analytics-env','comp-select','comp-qual','entrant-cohort'];
+  ids.forEach(id => { const node=el(id); if(node) node.addEventListener('change', () => { S.historyPage=1; S.upcomingPage=1; if (id==='comp-select') { S.compId = node.value; S.compUser = null; } renderAll(); }); });
+  ['leader-search','strategy-search','history-search','upcoming-search','history-game','history-player','comp-search','entrant-search'].forEach(id => {
     const node=el(id); if(node) node.addEventListener('input', () => { S.historyPage=1; S.upcomingPage=1; renderAll(); });
+  });
+  document.addEventListener('click', e => {
+    const review = e.target.closest('.review-link');
+    if (review && review.dataset.review) { openBet(review.dataset.review); }
   });
   S.filtersBound = true;
 }
@@ -162,6 +246,261 @@ function matches(row, envId='leader-env', roundId='leader-round', marketId='lead
   const modelMatch = (model === 'ALL') || ((row.model || row.category) === model);
   const searchMatch = !search || JSON.stringify(row).toLowerCase().includes(search);
   return envMatch && roundMatch && marketMatch && modelMatch && searchMatch;
+}
+
+/* ------------------------------------------------------------------ */
+/* Simulated competitions, entrants and bet review                     */
+/* ------------------------------------------------------------------ */
+const compsPayload = () => (S.data.competitions && !Array.isArray(S.data.competitions)) ? S.data.competitions : {};
+const comps = () => compsPayload().competitions || [];
+const entrantsPayload = () => (S.data.competitors && !Array.isArray(S.data.competitors)) ? S.data.competitors : {};
+const entrants = () => entrantsPayload().entrants || [];
+const activeComp = () => comps().find(c => c.id === S.compId) || null;
+
+function setLeaderView(view, updateHash = true) {
+  if (!document.getElementById(`leader-view-${view}`)) view = 'competitions';
+  S.leaderView = view;
+  $$('#leader-segmented button').forEach(b => b.classList.toggle('active', b.dataset.lview === view));
+  $$('.leader-view').forEach(v => v.classList.toggle('active', v.id === `leader-view-${view}`));
+}
+
+function selectCompetition(id, {fromHash=false, scroll=false} = {}) {
+  if (comps().some(c => c.id === id)) S.compId = id;
+  renderCompetitions();
+  if (scroll) el('comp-title')?.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function renderCompetitions() {
+  const compList = comps();
+  const payload = compsPayload();
+  const drawn = compList.filter(c => c.status !== 'NOT_DRAWN');
+  if (S.compId == null || (S.compId !== 'ALL' && !compList.some(c => c.id === S.compId))) {
+    S.compId = (drawn[0] && drawn[0].id) || (compList[0] && compList[0].id) || null;
+  }
+  setHTML('comp-banner', `<b>SIMULATED COMPETITION — paper research only.</b> Window start dates are randomized with the recorded seed <code>${h(payload.rng_seed || '—')}</code>; identical inputs reproduce identical windows. Standings re-aggregate real backtest records inside each window: outcomes, accuracy, Brier score and log loss come from the published ledger rows. Paper PnL appears only where <b>VERIFIED_PRICE</b> rows exist inside the window; otherwise it is explicitly unavailable, never synthesized. A standing is not an edge claim.`);
+  const cards = compList.map(c => {
+    const windowText = c.status === 'NOT_DRAWN' ? 'not drawn — insufficient scope data' : `${fmtTS(c.window_start)} → ${fmtTS(c.window_end)}`;
+    const scopeLabel = c.env_scope === 'POST' ? 'Postseason · all rounds' : (ROUND_LABEL[c.env_scope] || c.env_scope);
+    return `<button class="comp-card ${c.id===S.compId?'selected':''}" data-comp="${h(c.id)}">
+      <div><span class="pill env-${h(c.env_scope)}">${h(c.env_scope)}</span><span class="badge ${c.status==='NOT_DRAWN'?'warning':'good'}">${h(c.status || 'DRAWN')}</span></div>
+      <b>${h(c.name)}</b>
+      <code class="ts">${windowText}</code>
+      <small>${fmtN(c.qualified_entrants)}/${fmtN(c.entrants_in_cohort)} entrants qualified · min ${fmtN(c.min_picks)} picks · ${fmtN(c.scored_dates_in_window)} scored dates · draws ${fmtN(c.rng_draw_attempts)}</small>
+    </button>`;
+  }).join('');
+  setHTML('comp-cards', cards || '<div class="empty">No simulated competitions are published. Run scripts/build_competitions.py against a verified export.</div>');
+  $$('.comp-card').forEach(card => card.addEventListener('click', () => selectCompetition(card.dataset.comp, {scroll:true})));
+  const sel = el('comp-select');
+  if (sel) {
+    sel.innerHTML = compList.map(c => `<option value="${h(c.id)}">${h(c.name)} · ${h(c.env_scope)}</option>`).join('');
+    if (S.compId) sel.value = S.compId;
+  }
+
+  const comp = activeComp();
+  const title = el('comp-title');
+  const meta = el('comp-meta');
+  const tbody = document.querySelector('#comp-standings-table tbody');
+  if (title) title.textContent = comp ? `${comp.name} — standings` : 'Competition standings';
+  if (meta) meta.textContent = comp && comp.status !== 'NOT_DRAWN'
+    ? `window ${fmtTS(comp.window_start)} → ${fmtTS(comp.window_end)} (UTC, second precision) · scope ${comp.env_scope} · ${comp.window_days} days · seed draw #${comp.rng_draw_attempts}`
+    : (comp ? `NOT DRAWN: ${comp.not_drawn_reason || 'insufficient data'}` : '');
+  if (!tbody) return;
+  if (!comp) { tbody.innerHTML = '<tr><td colspan="10" class="empty-cell">No competition data.</td></tr>'; setHTML('comp-picks',''); return; }
+  const qualMode = selected('comp-qual');
+  const q = (el('comp-search')?.value || '').toLowerCase();
+  const rows = comp.standings.filter(s => (qualMode==='ALL' || s.qualification_status===qualMode) && (!q || JSON.stringify(s).toLowerCase().includes(q)));
+  tbody.innerHTML = rows.length ? rows.map(s => `
+    <tr class="standing-row ${s.username===S.compUser?'selected':''}" data-user="${h(s.username)}">
+      <td>${s.rank != null ? `<b>${s.rank}</b>` : '<span class="muted">—</span>'}</td>
+      <td><button class="link-button standing-user" data-user="${h(s.username)}">${h(s.username)}</button><br><span class="badge ${s.qualified?'good':'neutral'}">${h(s.qualification_status)}</span></td>
+      <td><button class="link-button strategy-link" data-id="${h(s.strategy_id)}">${h(s.strategy_id)}</button><br><small>${h(s.slice_label)}</small></td>
+      <td>${fmtN(s.picks)}</td>
+      <td>${fmtN(s.wins)}–${fmtN(s.losses)}${s.pushes?`–${fmtN(s.pushes)}`:''}</td>
+      <td>${s.accuracy == null ? '—' : fmtPct(s.accuracy*100)}</td>
+      <td>${s.brier == null ? '—' : Number(s.brier).toFixed(4)}</td>
+      <td>${s.log_loss == null ? '—' : Number(s.log_loss).toFixed(4)}</td>
+      <td>${fmtN(s.verified_price_rows)}</td>
+      <td>${s.pnl == null ? `<span class="badge warning" title="${h(s.pnl_status||'')}">NO VERIFIED PRICE ROWS</span>` : fmtMoney(s.pnl)}</td>
+    </tr>`).join('') : '<tr><td colspan="10" class="empty-cell">No entrants match this filter.</td></tr>';
+  $$('#comp-standings-table .standing-user').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); S.compUser = b.dataset.user; renderCompetitions(); }));
+  $$('#comp-standings-table tr.standing-row').forEach(tr => tr.addEventListener('click', () => { S.compUser = tr.dataset.user; renderCompetitions(); }));
+  $$('#comp-standings-table .strategy-link').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); openStrategy(b.dataset.id); }));
+  renderCompPicks();
+}
+
+function renderCompPicks() {
+  const box = el('comp-picks');
+  if (!box) return;
+  const comp = activeComp();
+  const username = S.compUser;
+  if (!comp || !username) { box.innerHTML = '<p class="muted">Select an entrant above to re-derive their windowed picks from the published ledger and review every bet.</p>'; return; }
+  const entrant = entrants().find(e => e.username === username);
+  const standing = (comp.standings || []).find(s => s.username === username);
+  if (!entrant || !standing) { box.innerHTML = ''; return; }
+  const rows = arr('bets_ledger').filter(r =>
+    rowInScope(r, comp.env_scope) &&
+    sliceMatches(r, entrant.slice) &&
+    dayOf(r.game_date) >= dayOf(comp.window_start) && dayOf(r.game_date) <= dayOf(comp.window_end) &&
+    ['W','L','P'].includes(r.result));
+  const recomputed = scoreSummary(rows);
+  const verifiedMatch = recomputed.picks === standing.picks &&
+    (recomputed.brier == null && standing.brier == null || Math.abs((recomputed.brier ?? 0) - (standing.brier ?? 0)) < 1e-9);
+  const capped = rows.slice(0, 120);
+  box.innerHTML = `
+    <div class="panel sub-panel">
+      <div class="panel-head"><h3>${h(username)} — windowed picks (${fmtN(rows.length)})</h3>
+      <span class="badge ${verifiedMatch?'good':'bad'}">${verifiedMatch
+        ? `browser re-derivation matches published standings (n=${fmtN(recomputed.picks)})`
+        : 're-derivation MISMATCH — flag in issue queue'}</span></div>
+      <p class="muted">${h(comp.name)} · ${fmtTS(comp.window_start)} → ${fmtTS(comp.window_end)} UTC · slice: ${h(entrant.slice_label)} · parent ${h(entrant.strategy_id)}. Every pick below is a real exported ledger row; review links open the official record of the game and, where captured, the price observation.</p>
+      <div class="table-wrap"><table><thead><tr><th>Bet ID</th><th>Game date (UTC)</th><th>Game</th><th>Matchup</th><th>Selection</th><th>Model P</th><th>Price</th><th>Result</th><th>Verification</th><th>Review</th></tr></thead><tbody>
+      ${capped.map(r => `<tr>
+        <td>${h(r.bet_id)}</td>
+        <td class="ts">${h(r.game_date)}</td>
+        <td>${h(r.game_pk)}</td>
+        <td>${h(r.away_abbr || '')} @ ${h(r.home_abbr || '')}</td>
+        <td>${h(r.selection)}</td>
+        <td>${Number.isFinite(Number(r.model_prob)) ? fmtPct(Number(r.model_prob)*100) : '—'}</td>
+        <td>${h(r.market_price ?? 'no verified quote')}</td>
+        <td><b>${h(r.result || '—')}</b></td>
+        <td><span class="badge ${String(r.verification_status||'').includes('VERIFIED')?'good':'warning'}">${h(r.verification_status || '—')}</span></td>
+        <td>${reviewButton(r)}</td>
+      </tr>`).join('')}</tbody></table></div>
+      ${rows.length > capped.length ? `<p class="muted">Showing ${capped.length} of ${rows.length} rows; filter the Ledger tab by strategy ${h(entrant.strategy_id)} for the full export.</p>` : ''}
+    </div>`;
+}
+
+/* ------------------------------------------------------------------ */
+function renderEntrants() {
+  const list = entrants();
+  setHTML('entrant-banner', `<b>Entrant registry — simulated personas, transparent bindings.</b> ${h(entrantsPayload().cohort_note || '')}`);
+  const cohort = selected('entrant-cohort');
+  const q = (el('entrant-search')?.value || '').toLowerCase();
+  const rows = list.filter(e => (cohort==='ALL' || e.cohort===cohort) && (!q || JSON.stringify(e).toLowerCase().includes(q)));
+  setHTML('entrant-cards', rows.length ? rows.map(e => {
+    const career = e.career || {};
+    return `<button class="entrant-card" data-user="${h(e.username)}">
+      <div class="entrant-head"><span class="entrant-badge">${h(e.badge)}</span><span class="pill env-${h(e.parent_env)}">${h(e.parent_env)}</span></div>
+      <b>${h(e.username)}</b>
+      <small>${h(e.style)} · ${h(e.parent_market)}</small>
+      <code>${h(e.strategy_id)}</code>
+      <small>slice: ${h(e.slice_label)}</small>
+      <small class="muted">parent snapshot: ${career.win_rate == null ? 'no published record' : `${fmtPct(career.win_rate)} win · ${career.verified_pnl == null ? 'PnL unavailable' : fmtMoney(career.verified_pnl)}`}</small>
+    </button>`;
+  }).join('') : '<div class="empty">No entrants match this filter.</div>');
+  $$('.entrant-card').forEach(card => card.addEventListener('click', () => selectEntrant(card.dataset.user)));
+  if (S.entrantDetail && !list.some(e => e.username === S.entrantDetail)) S.entrantDetail = null;
+  renderEntrantDetail();
+}
+
+function selectEntrant(username, {fromHash=false} = {}) {
+  if (!entrants().some(e => e.username === username)) return;
+  S.entrantDetail = username;
+  renderEntrants();
+  el('entrant-detail-panel')?.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function renderEntrantDetail() {
+  const panel = el('entrant-detail-panel');
+  const username = S.entrantDetail;
+  if (!panel) return;
+  if (!username) { panel.style.display = 'none'; return; }
+  const e = entrants().find(x => x.username === username);
+  if (!e) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  setHTML('entrant-detail-title', `${e.username} — slice contract & record`);
+  const career = e.career || null;
+  const ledgerRows = arr('bets_ledger').filter(r => sliceMatches(r, e.slice) && ['W','L','P'].includes(r.result));
+  const exported = scoreSummary(ledgerRows);
+  const appearances = comps().map(c => {
+    const s = (c.standings || []).find(x => x.username === username);
+    return s ? {comp: c, standing: s} : null;
+  }).filter(Boolean);
+  const appearanceRows = appearances.map(({comp, standing: s}) => `<tr>
+    <td><button class="link-button comp-link" data-comp="${h(comp.id)}">${h(comp.name)}</button></td>
+    <td class="ts">${comp.window_start ? `${fmtTS(comp.window_start)} → ${fmtTS(comp.window_end)}` : 'NOT DRAWN'}</td>
+    <td>${s.rank != null ? s.rank : '—'}</td><td>${fmtN(s.picks)}</td>
+    <td>${s.accuracy == null ? '—' : fmtPct(s.accuracy*100)}</td>
+    <td>${s.brier == null ? '—' : Number(s.brier).toFixed(4)}</td>
+    <td><span class="badge ${s.qualified?'good':'neutral'}">${h(s.qualification_status)}</span></td>
+  </tr>`).join('');
+  setHTML('entrant-detail', `
+    <div class="modal-grid">
+      <div><b>Identity</b><p>Simulated competition persona (no real person or account). Style: ${h(e.style)}. Cohort: ${h(e.cohort)}.</p></div>
+      <div><b>Strategy binding (1:1)</b><p><button class="link-button strategy-link" data-id="${h(e.strategy_id)}">${h(e.strategy_id)}</button><br>${h(e.parent_name)} · model <code>${h(e.parent_model)}</code> · market ${h(e.parent_market)} · env ${h(e.parent_env)}</p></div>
+      <div><b>Slice spec (published)</b><p><code>side=${h(e.slice.side ?? 'ANY')} · seasons=${h((e.slice.seasons||[]).join('/') || 'ANY')} · prob∈[${h(e.slice.min_prob ?? '−∞')}, ${h(e.slice.max_prob ?? '∞')}) · rounds=${h((e.slice.rounds||[]).join('/') || 'ANY')}</code><br>Label: ${h(e.slice_label)}</p></div>
+      <div><b>Exported-record derivation</b><p>${fmtN(exported.picks)} scored rows in the committed export (W${exported.wins}–L${exported.losses}${exported.pushes?`–P${exported.pushes}`:''}), accuracy ${exported.accuracy == null ? '—' : fmtPct(exported.accuracy*100)}, Brier ${exported.brier == null ? '—' : exported.brier.toFixed(4)}, verified price rows ${fmtN(exported.verified_price_rows)}, paper PnL ${exported.pnl == null ? 'unavailable (no verified rows)' : fmtMoney(exported.pnl)}.</p></div>
+      ${career ? `<div><b>Parent strategy — all-history snapshot</b><p>${h(career.note || '')}<br>status ${h(career.strategy_status || '—')} · win ${career.win_rate == null ? '—' : fmtPct(career.win_rate)} · Brier ${career.brier == null ? '—' : Number(career.brier).toFixed(4)} · verified PnL ${career.verified_pnl == null ? '—' : fmtMoney(career.verified_pnl)} (${fmtN(career.verified_bets)} verified bets)</p></div>` : '<div><b>Parent strategy — all-history snapshot</b><p>No published aggregate.</p></div>'}
+      <div><b>Truthfulness contract</b><p>Every number above is re-derived from the same rows visible in the Ledger tab using the published slice spec. Nothing is simulated beyond the competition window draw.</p></div>
+    </div>
+    <hr>
+    <h4>Competition appearances (${appearances.length})</h4>
+    ${appearanceRows ? `<div class="table-wrap"><table><thead><tr><th>Competition</th><th>Window (UTC)</th><th>Rank</th><th>Picks</th><th>Accuracy</th><th>Brier</th><th>Status</th></tr></thead><tbody>${appearanceRows}</tbody></table></div>` : '<p class="muted">No competition appearances yet.</p>'}
+    <p><button class="button secondary entrant-ledger-link" data-id="${h(e.strategy_id)}">Open parent strategy records in the Ledger →</button></p>`);
+  $$('#entrant-detail .comp-link').forEach(b => b.addEventListener('click', () => { setLeaderView('competitions'); selectCompetition(b.dataset.comp, {scroll:true}); }));
+  $$('#entrant-detail .strategy-link').forEach(b => b.addEventListener('click', () => openStrategy(b.dataset.id)));
+  const ledgerBtn = document.querySelector('#entrant-detail .entrant-ledger-link');
+  if (ledgerBtn) ledgerBtn.addEventListener('click', () => {
+    go('history');
+    const search = el('history-search');
+    if (search) search.value = ledgerBtn.dataset.id;
+    renderHistory();
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Bet review modal: provenance chain + official manual-review links   */
+/* ------------------------------------------------------------------ */
+function findReviewRecord(key) {
+  if (key.startsWith('bet:')) {
+    const id = key.slice(4);
+    return arr('bets_ledger').find(r => String(r.bet_id) === id) || null;
+  }
+  if (key.startsWith('pred:')) {
+    const id = key.slice(5);
+    return arr('upcoming_bets').find(r => String(r.prediction_id) === id) || null;
+  }
+  return null;
+}
+function reviewKeyToHash(key) { return `bet/${encodeURIComponent(key)}`; }
+function openBet(key, {fromHash=false} = {}) {
+  const row = findReviewRecord(key);
+  if (!row) return;
+  if (!fromHash) history.replaceState(null,'',`#${reviewKeyToHash(key)}`);
+  const links = betReviewLinks(row);
+  const kv = (label, value, mono=false) => `<tr><td>${label}</td><td class="${mono?'ts':''}">${value == null || value === '' ? '<span class="muted">—</span>' : (typeof value === 'string' && value.startsWith('<') ? value : h(value))}</td></tr>`;
+  setHTML('bet-modal-body', `
+    <p class="eyebrow">MANUAL BET REVIEW · ${h(row.verification_status || 'NO_MARKET_PRICE')}</p>
+    <h2>${row.bet_id != null ? `Bet ${h(row.bet_id)}` : h(row.prediction_id)}</h2>
+    <p class="muted">Review this record against the official sources below. Dates and times are shown in UTC to the second whenever the record carries them. A price review link exists only when the record has a captured quote observation — ${row.quote_source_url ? 'this record has one.' : 'this record has none, so no price was and can be verified for it.'}</p>
+    <div class="link-list">
+      ${links.map(l => `<a href="${h(l.url)}" target="_blank" rel="noreferrer">${h(l.label)} ↗</a>`).join('')}
+      ${row.quote_source_url ? '' : '<span class="badge warning">PRICE SOURCE — NOT CAPTURED ON THIS RECORD</span>'}
+    </div>
+    <h3>Provenance chain</h3>
+    <div class="table-wrap"><table class="kv-table"><tbody>
+      ${kv('SOURCE (quote)', row.quote_source_id ? `${h(row.quote_source_id)}` : '<span class="badge warning">NO VERIFIED QUOTE</span>')}
+      ${kv('RETRIEVAL TIME (quote observed)', row.quote_observed_at ? fmtTS(row.quote_observed_at) : null, true)}
+      ${kv('AVAILABILITY TIME (quote)', row.quote_available_at ? fmtTS(row.quote_available_at) : null, true)}
+      ${kv('DECISION TIME', fmtTS(row.made_at || row.decision_time), true)}
+      ${kv('DERIVED VALUES', `model ${row.model ?? h(row.strategy_id)} · P(selected) ${Number.isFinite(Number(row.model_prob ?? row.model_probability)) ? fmtPct(Number(row.model_prob ?? row.model_probability)*100) : '—'} · fair ${Number.isFinite(Number(row.fair_price)) ? fmtPct(Number(row.fair_price)*100) : '—'} · required price ${row.required_price ?? '—'} · edge ${row.edge ?? '—'}`)}
+      ${kv('MODEL OUTPUT (selection)', `${h(row.selection)} ${h(row.market || '')}`)}
+      ${kv('GAME', `${h(row.away_abbr || '')} @ ${h(row.home_abbr || '')} · game_pk ${h(row.game_pk)} · ${h(row.game_date || '')} · season ${h(row.season || '')} · env ${h(row.env || row.environment || '')}${row.round_code ? ' · round ' + h(row.round_code) : ''}`)}
+      ${kv('RESULT', h(row.result || '—'))}
+      ${kv('SETTLEMENT / STATUS', `${h(row.status || '—')}${row.hash_chained ? ' · hash-chained immutable ledger row' : ''}`)}
+      ${kv('PnL', row.pnl == null ? '<span class="muted">—</span>' : fmtMoney(row.pnl))}
+      ${kv('run', h(row.run_id || ''))}
+    </tbody></table></div>
+    <h3>Strategy</h3>
+    <p><button class="link-button strategy-link" data-id="${h(String(row.strategy_id || row.strategy_version_id || '').replace(/_v1$/, ''))}">${h(row.strategy_id || row.strategy_version_id || '—')}</button> <span class="muted">opens the full Hypothesis → Limitations contract</span></p>`);
+  const modal = el('bet-modal');
+  if (modal) { modal.classList.add('open'); modal.setAttribute('aria-hidden','false'); }
+  $$('#bet-modal-body .strategy-link').forEach(b => b.addEventListener('click', () => { closeBetModal(); openStrategy(b.dataset.id); }));
+}
+function closeBetModal() {
+  const modal = el('bet-modal');
+  if (modal) { modal.classList.remove('open'); modal.setAttribute('aria-hidden','true'); }
+  if (location.hash.startsWith('#bet/')) history.replaceState(null,'',`#${S.tab || 'history'}`);
 }
 
 function renderLeaderboard() {
@@ -317,6 +656,7 @@ function renderPostseason() {
       <td><b>${h(r.result||'—')}</b></td>
       <td style="color:${(r.pnl||0)>0?'var(--green)':'var(--red)'}">${fmtMoney(r.pnl)}</td>
       <td><span class="badge good">${h(r.verification_status)}</span></td>
+      <td>${reviewButton(r)}</td>
     </tr>`).join('');
   }
 
@@ -380,7 +720,7 @@ function renderUpcoming() {
   if (empty) { empty.style.display=all.length?'none':'block'; empty.textContent=all.length?'':'No upcoming predictions are published. A fresh forward-test run is required; no future game or price is guessed.'; }
   const slice = pageSlice(all, S.upcomingPage); S.upcomingPage = slice.page;
   const tbody = document.querySelector('#upcoming-table tbody');
-  if (tbody) tbody.innerHTML=slice.rows.map(r=>`<tr><td>${h(r.decision_time)}</td><td>${h(r.strategy_version_id)}</td><td>${h(r.game_pk)}</td><td>${h(r.selection)}</td><td>${r.model_probability==null?'—':fmtPct(r.model_probability*100)}</td><td>${r.fair_price==null?'—':fmtPct(r.fair_price*100)}</td><td class="muted">${h(r.market_price ?? 'No observed quote')}</td><td><span class="badge warning">${h(r.status||'PROPOSED')}</span></td></tr>`).join('');
+  if (tbody) tbody.innerHTML=slice.rows.map(r=>`<tr><td class="ts">${fmtTS(r.decision_time)}</td><td>${h(r.strategy_version_id)}</td><td>${h(r.game_pk)}</td><td>${h(r.selection)}</td><td>${r.model_probability==null?'—':fmtPct(r.model_probability*100)}</td><td>${r.fair_price==null?'—':fmtPct(r.fair_price*100)}</td><td class="muted">${h(r.market_price ?? 'No observed quote')}</td><td><span class="badge warning">${h(r.status||'PROPOSED')}</span></td><td>${reviewButton(r)}</td></tr>`).join('');
   setHTML('upcoming-pager', pagerHTML('upcoming', slice.page, slice.pages, slice.total));
   bindPagers();
 }
@@ -407,7 +747,7 @@ function renderHistory() {
   const slice = pageSlice(all, S.historyPage); S.historyPage = slice.page;
   setHTML('history-count', all.length ? `${fmtN(all.length)} matching records (exported ledger is capped).` : '');
   const tbody=document.querySelector('#history-table tbody');
-  if (tbody) tbody.innerHTML=slice.rows.length?slice.rows.map(r=>`<tr><td>${h(r.event_type||r.status||'BET')}</td><td>${h(r.bet_id)}</td><td>${h(r.game_pk)}<small>${h(r.away_abbr||'')} @ ${h(r.home_abbr||'')}</small></td><td><button class="link-button strategy-link" data-id="${h(String(r.strategy_id||r.strategy_version_id||'').replace(/_v1$/,''))}">${h(r.strategy_id||r.strategy_version_id)}</button></td><td>${h(r.market)}</td><td>${h(r.selection)}</td><td>${h(r.market_price ?? r.price_american ?? '—')}</td><td>${h(r.result||'—')}</td><td>${r.pnl==null?'—':fmtMoney(r.pnl)}</td><td><span class="badge ${String(r.verification_status||'').includes('VERIFIED')?'good':'warning'}">${h(r.verification_status||'—')}</span></td></tr>`).join(''):'<tr><td colspan="10" class="empty-cell">No immutable wager records match this filter.</td></tr>';
+  if (tbody) tbody.innerHTML=slice.rows.length?slice.rows.map(r=>`<tr><td>${h(r.event_type||r.status||'BET')}</td><td>${h(r.bet_id)}</td><td>${h(r.game_pk)}<small>${h(r.away_abbr||'')} @ ${h(r.home_abbr||'')}</small></td><td><button class="link-button strategy-link" data-id="${h(String(r.strategy_id||r.strategy_version_id||'').replace(/_v1$/,''))}">${h(r.strategy_id||r.strategy_version_id)}</button></td><td>${h(r.market)}</td><td>${h(r.selection)}</td><td>${h(r.market_price ?? r.price_american ?? '—')}</td><td>${h(r.result||'—')}</td><td>${r.pnl==null?'—':fmtMoney(r.pnl)}</td><td><span class="badge ${String(r.verification_status||'').includes('VERIFIED')?'good':'warning'}">${h(r.verification_status||'—')}</span></td><td>${reviewButton(r)}</td></tr>`).join(''):'<tr><td colspan="11" class="empty-cell">No immutable wager records match this filter.</td></tr>';
   setHTML('history-pager', pagerHTML('history', slice.page, slice.pages, slice.total));
   bindPagers();
   $$('#history-table .strategy-link').forEach(b=>b.addEventListener('click',()=>openStrategy(b.dataset.id)));
@@ -513,5 +853,9 @@ document.addEventListener('DOMContentLoaded',()=>{
   initTabs();
   const close=el('modal-close'); if(close) close.addEventListener('click',closeModal);
   const modal=el('strategy-modal'); if(modal) modal.addEventListener('click',e=>{if(e.target.id==='strategy-modal')closeModal();});
+  const betClose=el('bet-modal-close'); if(betClose) betClose.addEventListener('click',closeBetModal);
+  const betModal=el('bet-modal'); if(betModal) betModal.addEventListener('click',e=>{if(e.target.id==='bet-modal')closeBetModal();});
+  const entrantClose=el('entrant-detail-close');
+  if (entrantClose) entrantClose.addEventListener('click',()=>{ S.entrantDetail=null; renderEntrants(); });
   loadData();
 });

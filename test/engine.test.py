@@ -177,6 +177,24 @@ class TestMLBCompEngine(unittest.TestCase):
         finally:
             export_static.DATA, export_static.FEAT = old_data, old_feat
 
+    def test_export_writes_safe_empty_competition_payloads(self):
+        from mlbcomp.web import export_static
+        tmp = Path(self.tmp.name) / 'export2'
+        tmp.mkdir()
+        old_data, old_feat = export_static.DATA, export_static.FEAT
+        export_static.DATA = tmp
+        export_static.FEAT = tmp / 'features'
+        try:
+            summary = export_static.export(ledger_cap=50, force=True)
+            for name in ('competitions.json', 'competitors.json'):
+                payload = json.loads((tmp / name).read_text())
+                self.assertEqual(payload.get('competitions', payload.get('entrants')), [])
+            self.assertEqual(summary['data_mode'], 'NO_SOURCE_SNAPSHOT')
+            self.assertEqual(summary['total_competitions'], 0)
+            self.assertTrue(summary['competition_seed'])
+        finally:
+            export_static.DATA, export_static.FEAT = old_data, old_feat
+
     def test_missing_quote_cannot_create_wager(self):
         p = Prediction('p', 'strategy_v1', 10, 'REG', None, '2026-09-21T12:00:00Z',
                        '2026-09-21T11:59:00Z', 'HOME', .55, .55, -122, .03, None)
@@ -217,6 +235,144 @@ class TestMLBCompEngine(unittest.TestCase):
         self.assertEqual(round_format_label('WC', 2024), 'BO3')
         self.assertEqual(round_format_label('DS', 2024), 'BO5')
         self.assertEqual(round_format_label('WS', 2024), 'BO7')
+
+
+class TestCompetitionEngine(unittest.TestCase):
+    """Adversarial checks on the simulated-competition layer."""
+
+    def _row(self, **kw):
+        base = dict(bet_id=1, game_pk=700001, strategy_id='MLB_REG_ELO_001',
+                    env='REG', season=2026, round_code=None, market='ML',
+                    selection='HOME', model_prob=0.6, fair_price=0.6,
+                    made_at='2026-05-02T18:05:00Z', status='EVAL', result=None,
+                    pnl=None, stake=0.0, verification_status='NO_MARKET_PRICE',
+                    game_date='2026-05-02', home_abbr='NYY', away_abbr='BOS')
+        base.update(kw)
+        return base
+
+    def _dataset(self):
+        rows = []
+        # Ten scored REG days, alternating results for two strategies.
+        for i in range(10):
+            day = f'2026-05-{i + 1:02d}'
+            rows.append(self._row(bet_id=100 + i, game_pk=700000 + i, game_date=day,
+                                  selection='HOME', model_prob=0.6,
+                                  result='W' if i % 2 == 0 else 'L',
+                                  made_at=f'{day}T18:05:00Z'))
+            rows.append(self._row(bet_id=200 + i, game_pk=710000 + i, game_date=day,
+                                  strategy_id='MLB_REG_FORM_001', selection='AWAY',
+                                  model_prob=0.55, result='L' if i % 3 else 'W'))
+        # Verified-price row: the only row allowed to carry paper PnL.
+        rows.append(self._row(bet_id=300, game_pk=720000, game_date='2026-05-15',
+                              model_prob=0.62, result='W', stake=100.0, pnl=61.29,
+                              verification_status='VERIFIED_PRICE',
+                              market_price=-110, quote_source_url='https://example.test/q',
+                              quote_observed_at='2026-05-15T16:00:00Z',
+                              quote_available_at='2026-05-15T16:01:00Z',
+                              quote_price_american=-110))
+        # A PROPOSED row inside a window must never be scored.
+        rows.append(self._row(bet_id=301, game_pk=720001, game_date='2026-05-16',
+                              result=None, status='PROPOSED'))
+        return rows
+
+    def test_score_rows_uses_real_outcomes_only(self):
+        from mlbcomp.engine.competition import score_rows
+        rows = self._dataset()
+        scored = score_rows([r for r in rows if r['strategy_id'] == 'MLB_REG_ELO_001'])
+        self.assertEqual(scored['picks'], 11)          # 10 EVAL + 1 verified, PROPOSED excluded
+        self.assertEqual(scored['wins'], 6)
+        self.assertEqual(scored['losses'], 5)
+        self.assertAlmostEqual(scored['accuracy'], 6 / 11)
+        # Brier pairs the selected-side probability with the actual result.
+        brier = sum(((0.6 - (1 if r['result'] == 'W' else 0)) ** 2 if r['bet_id'] != 300
+                     else (0.62 - 1) ** 2) for r in rows
+                    if r['strategy_id'] == 'MLB_REG_ELO_001' and r['result']) / 11
+        self.assertAlmostEqual(scored['brier'], brier)
+        self.assertEqual(scored['verified_price_rows'], 1)
+        self.assertEqual(scored['pnl'], 61.29)
+
+    def test_no_pnl_without_verified_rows(self):
+        from mlbcomp.engine.competition import score_rows
+        rows = [r for r in self._dataset() if r['verification_status'] != 'VERIFIED_PRICE']
+        scored = score_rows(rows)
+        self.assertIsNone(scored['pnl'])
+        self.assertIsNone(scored['roi'])
+        self.assertEqual(scored['pnl_status'], 'UNAVAILABLE_NO_VERIFIED_PRICE_ROWS_IN_WINDOW')
+        self.assertEqual(scored['verified_price_rows'], 0)
+
+    def test_build_is_deterministic_and_seed_sensitive(self):
+        from mlbcomp.engine.competition import build_payloads, COMPETITION_SPECS
+        strategies = [{'sid': 'MLB_REG_ELO_001', 'id': 'MLB_REG_ELO_001', 'env': 'REG',
+                       'market': 'ML', 'model': 'elo', 'name': 'Elo baseline'}]
+        board = [{'id': 'MLB_REG_ELO_001'}]
+        rows = self._dataset()
+        first = build_payloads(strategies, board, rows, seed='seed-a', generated_at='2026-09-22T00:00:00Z')
+        second = build_payloads(strategies, board, rows, seed='seed-a', generated_at='2026-09-22T00:00:00Z')
+        self.assertEqual(first, second)
+        third = build_payloads(strategies, board, rows, seed='seed-b', generated_at='2026-09-22T00:00:00Z')
+        self.assertNotEqual(
+            [(c['id'], c['window_start']) for c in third[1]['competitions']],
+            [(c['id'], c['window_start']) for c in first[1]['competitions']],
+            'a different recorded seed must change at least one drawn window')
+
+    def test_window_timestamps_are_second_precise_and_bounded(self):
+        from mlbcomp.engine.competition import build_payloads
+        strategies = [{'sid': 'MLB_REG_ELO_001', 'id': 'MLB_REG_ELO_001', 'env': 'REG',
+                       'market': 'ML', 'model': 'elo', 'name': 'Elo baseline'}]
+        _, payload = build_payloads(strategies, [], self._dataset(),
+                                    seed='seed-a', generated_at='2026-09-22T00:00:00Z')
+        import re
+        stamp = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        for comp in payload['competitions']:
+            if comp.get('status') == 'NOT_DRAWN':
+                self.assertTrue(comp['not_drawn_reason'])
+                self.assertIsNone(comp['window_start'])
+                continue
+            self.assertRegex(comp['window_start'], stamp)
+            self.assertRegex(comp['window_end'], stamp)
+            self.assertTrue(comp['window_start'].endswith('00:00:00Z'))
+            self.assertTrue(comp['window_end'].endswith('23:59:59Z'))
+            self.assertLessEqual(comp['window_start'][:10], comp['window_end'][:10])
+        self.assertEqual(payload['rng_seed'], 'seed-a')
+
+    def test_min_picks_gate_and_scope_isolation(self):
+        from mlbcomp.engine.competition import (CompetitionSpec, Slice, Entrant,
+                                                build_competitions)
+        entrant = Entrant(username='Tester', slice=Slice('MLB_REG_FORM_001'),
+                          style='full-spectrum', parent_name='form', parent_env='REG',
+                          parent_model='form', parent_market='ML')
+        spec = CompetitionSpec('T1', 'Test comp', 'REG', 5, ('2026-05-01', '2026-05-06'),
+                               min_picks=20, description='test')
+        comps = build_competitions(self._dataset(), [entrant], [spec], seed='s')
+        standing = comps[0]['standings'][0]
+        self.assertFalse(standing['qualified'])
+        self.assertIsNone(standing['rank'])
+        self.assertEqual(standing['qualification_status'], 'BELOW_MIN_PICKS')
+        # A REG-scoped competition never sees POST/round rows.
+        post_row = self._row(env='POST', round_code='DS', result='W', game_date='2026-05-02')
+        comps2 = build_competitions(self._dataset() + [post_row], [entrant], [spec], seed='s')
+        self.assertEqual(comps2[0]['standings'][0]['picks'], standing['picks'])
+
+    def test_slice_predicates_are_pure_filters(self):
+        from mlbcomp.engine.competition import Slice
+        row = self._row(selection='OVER 8.5', model_prob=0.58, season=2025,
+                        round_code='DS')
+        self.assertTrue(Slice('MLB_REG_TOTALS_001', side='OVER').matches(
+            {**row, 'strategy_id': 'MLB_REG_TOTALS_001'}))
+        self.assertFalse(Slice('MLB_REG_TOTALS_001', side='UNDER').matches(
+            {**row, 'strategy_id': 'MLB_REG_TOTALS_001'}))
+        s = Slice('MLB_X', min_prob=0.55, max_prob=0.6, seasons=(2024,), rounds=('DS',))
+        self.assertFalse(s.matches({**row, 'strategy_id': 'MLB_X'}))            # wrong season
+        self.assertTrue(Slice('MLB_X', min_prob=0.55, rounds=('DS',)).matches(
+            {**row, 'strategy_id': 'MLB_X'}))
+        self.assertFalse(Slice('MLB_X', min_prob=0.59).matches(
+            {**row, 'strategy_id': 'MLB_X'}))                                   # prob too low
+
+    def test_empty_export_is_a_valid_no_data_state(self):
+        from mlbcomp.engine.competition import build_payloads
+        competitors, competitions = build_payloads([], [], [], seed='s')
+        self.assertEqual(competitors['entrants'], [])
+        self.assertEqual(competitions['competitions'], [])
 
     def test_players_register_populated_and_valid(self):
         root = Path(__file__).resolve().parent.parent

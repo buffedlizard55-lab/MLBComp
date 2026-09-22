@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ import pandas as pd
 from .. import db
 from ..config import DATA, FEAT, ENVS, ENV_LABEL, ROUNDS, ROUND_LABEL, STARTING_BANKROLL, TODAY
 from ..engine.catalog import register_catalog
+from ..engine.competition import DEFAULT_SEED, ENGINE_VERSION as COMPETITION_VERSION, build_payloads
 from ..engine.strategies import build_catalog
 from ..sources import registry_snapshot
 
@@ -141,7 +143,12 @@ def _chain_status() -> bool | None:
 
 
 def _ledger(cap: int) -> list[dict[str, Any]]:
-    bets = _db_frame("SELECT * FROM bets ORDER BY bet_id DESC")
+    # Verified-price rows first: a capped export would otherwise contain zero
+    # reviewable wagers and no usable closing/quote provenance (observed on the
+    # 2026-09-22 snapshot export, which held 20,000 NO_MARKET_PRICE rows).
+    bets = _db_frame(
+        "SELECT * FROM bets ORDER BY "
+        "CASE WHEN verification_status = 'VERIFIED_PRICE' THEN 0 ELSE 1 END, bet_id DESC")
     if bets.empty:
         return []
     games = _db_frame("SELECT game_pk, home_team_id, away_team_id, game_date FROM games")
@@ -351,6 +358,7 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT, force: bool = False) -> dict[st
             if (strategy["sid"], strategy["env"]) in metric_keys and strategy.get("status") == "NOT_RUN":
                 strategy["status"] = "BACKTESTED"
     leaderboard = _leaderboard(strategies, metrics)
+    ledger_rows = _ledger(ledger_cap)
     games = _db_frame("SELECT * FROM games")
     bets = _db_frame("SELECT * FROM bets")
     verified_bets = bets[bets.verification_status == "VERIFIED_PRICE"] if not bets.empty else bets
@@ -401,10 +409,15 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT, force: bool = False) -> dict[st
     # A fetch manifest alone is not a usable model snapshot; normalized games
     # must pass ingest before the site leaves its safe empty mode.
     source_snapshot = bool((FEAT / "games.parquet").exists())
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    comp_seed = os.environ.get("MLBCOMP_COMP_SEED", DEFAULT_SEED)
+    competitors_payload, competitions_payload = build_payloads(
+        strategies, leaderboard, ledger_rows,
+        seed=comp_seed, generated_at=generated_at)
     summary = {
         "competition_name": "ARENA AI — MLB Autonomous MLB Research & Paper Competition",
         "as_of_date": TODAY,
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at,
         "generated_by": "mlbcomp.web.export_static",
         "data_mode": "SOURCE_SNAPSHOT" if source_snapshot else "NO_SOURCE_SNAPSHOT",
         "current_season": 2026,
@@ -413,6 +426,16 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT, force: bool = False) -> dict[st
         "upcoming_games": upcoming_games,
         "incomplete_historical_games": incomplete_historical,
         "total_strategies": len(strategies), "total_simulated_bets": len(bets),
+        "total_competition_entrants": len(competitors_payload["entrants"]),
+        "total_competitions": len(competitions_payload["competitions"]),
+        "competition_seed": comp_seed,
+        "competition_generator": COMPETITION_VERSION,
+        "competitions_note": (
+            "Simulated competitions: randomized window start dates (recorded seed) over the "
+            "exported records; entrants are personas bound to transparent strategy slices; "
+            "standings are deterministic re-aggregations of real records; PnL is published "
+            "only where VERIFIED_PRICE rows exist in the window."
+        ),
         "settled_bets": int((bets.status == "SETTLED").sum()) if not bets.empty else 0,
         "total_simulated_pnl": round(real_pnl, 2) if real_pnl is not None else None,
         "unique_verified_pnl": unique_pnl,
@@ -423,7 +446,7 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT, force: bool = False) -> dict[st
         "total_upcoming_bets": len(_upcoming()), "total_open_positions": int(_db_frame("SELECT * FROM positions WHERE state='OPEN'").shape[0]),
         "total_kalshi_trades": int(_db_frame("SELECT * FROM immutable_ledger WHERE market='PREDICTION_MARKET'").shape[0]),
         "kalshi_status": "OPTIONAL — no contracts, quotes, fills or liquidity are created without verified API observations",
-        "ledger_records_exported": len(_ledger(ledger_cap)),
+        "ledger_records_exported": len(ledger_rows),
         "bet_records_in_db": len(bets),
         "immutable_ledger_rows": int(_db_frame("SELECT * FROM immutable_ledger").shape[0]),
         "hash_chain_valid": (_chain_status()),
@@ -443,7 +466,9 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT, force: bool = False) -> dict[st
     _write("summary.json", summary)
     _write("leaderboard.json", leaderboard)
     _write("strategies.json", strategies)
-    _write("bets_ledger.json", _ledger(ledger_cap))
+    _write("bets_ledger.json", ledger_rows)
+    _write("competitors.json", competitors_payload)
+    _write("competitions.json", competitions_payload)
     _write("upcoming_bets.json", _upcoming())
     _write("open_positions.json", [dict(r) for r in _db_frame("SELECT * FROM positions WHERE state='OPEN'").to_dict(orient="records")])
     _write("research_experiments.json", _research())

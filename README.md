@@ -12,10 +12,22 @@ order-placement client in this repository.
 - Separate `REG`, `POST`, `WC`, `DS`, `LCS`, `WS` and `ALL` environments.
   `ALL` is a view that retains the environment breakdown; it is not a blended
   score that hides postseason results.
-- A 68-entry versioned research catalog spanning baselines, starting pitchers,
+- A 90-entry versioned research catalog spanning baselines, starting pitchers,
   bullpens, lineups/injuries, Statcast, pitch mix, park/weather, umpires,
   rest/travel, market movement, totals, first-five, run line, team/player
   props, live, futures, exchange and prediction-market hypotheses.
+- A simulated-competition layer for the leaderboards: competitions run over
+  randomized windows of the verified export (start dates drawn from a recorded
+  RNG seed, reproducible byte-for-byte), and a roster of competition entrant
+  personas bound 1:1 to transparent strategy slices. Standings are
+  deterministic re-aggregations of real ledger rows — accuracy/Brier/log-loss
+  come from observed outcomes, and PnL appears only where `VERIFIED_PRICE`
+  rows exist inside the window. Nothing about an entrant's record is invented.
+- Per-bet manual review: every wager/pick row in the UI links to the official
+  MLB Stats API game feed, box score and Gameday page (keyed by `game_pk`),
+  plus the schedule for the game date, and the captured price-source
+  observation whenever a record has one. All timestamps render in UTC to the
+  second. A record without a captured quote is flagged — no price is implied.
 - Postseason transfer, adjusted, dedicated, series-state, hierarchical and
   round-specific model slots. Wild Card, Division Series, LCS and World Series
   have independent strategy/model versions.
@@ -80,6 +92,8 @@ python -m mlbcomp.engine.backtest                 # chronological competition
 python -m mlbcomp.engine.research                  # questions + Models A–E
 python -m mlbcomp.verify.checks                    # 18 adversarial controls
 python -m mlbcomp.web.export_static                # publish data/*.json
+python scripts/build_competitions.py               # additive competition layer refresh
+python scripts/build_competitions.py --check       # validate invariants without writing
 python -m http.server 8000 --bind 0.0.0.0          # GitHub Pages-style preview
 ```
 
@@ -126,6 +140,17 @@ safe `NO_SOURCE_SNAPSHOT` export is a valid test state.
 - The committed JSON is a SOURCE_SNAPSHOT from 2026-09-21. `data/raw/` and
   `data/features/` are gitignored, so this sandbox cannot re-run ingest/backtest.
   Do not treat a missing parquet tree as a reason to wipe the published numbers.
+- The committed ledger export is capped. The previous export sort order put the
+  newest rows first, so the capped file contained zero `VERIFIED_PRICE` rows;
+  `_ledger()` now sorts verified-price rows first so future capped exports stay
+  reviewable with real quote provenance. Until the next full export runs,
+  per-bet paper PnL remains unavailable in the static artifact and competition
+  standings report accuracy/calibration with PnL explicitly flagged
+  `UNAVAILABLE_NO_VERIFIED_PRICE_ROWS_IN_WINDOW`.
+- Simulated competitions are re-aggregations, not retrained models: an
+  entrant's slice simply filters the parent strategy's published rows by side,
+  season, probability band or round. Postseason competition windows are tiny
+  by construction — `INSUFFICIENT_SAMPLE` applies to every postseason standing.
 - Source coverage, historical quote timestamps, lineups, injuries, weather,
   umpire assignments, player props, live markets and Kalshi order-book history
   are source-dependent and remain `NOT_VERIFIED` until explicitly observed.
