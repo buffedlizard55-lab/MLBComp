@@ -56,10 +56,6 @@ def record_forward_test(prediction: Prediction, run_id: str,
 def paper_trade(prediction: Prediction, quote: ObservedQuote, bankroll: float,
                 stake: float | None = None) -> int:
     """Open a bounded paper position.  This function cannot place live orders."""
-    if quote.market_type not in {"ML", "RL", "TOTAL", "TEAM_TOTAL", "F5_ML", "F5_TOTAL",
-                                 "NRFI", "YRFI", "PLAYER_PROP", "PITCHER_PROP", "ALT_LINE",
-                                 "LIVE", "EXCHANGE", "PREDICTION_MARKET", "FUTURES"}:
-        raise ValueError("unknown market type")
     return record_wager(prediction, quote, bankroll, stake=stake)
 
 
