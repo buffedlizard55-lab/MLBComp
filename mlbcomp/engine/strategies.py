@@ -58,13 +58,17 @@ def model_lateform(g, f, ctx) -> float:
     return _sig(1.3 * (f["h_sep_rd"] - f["a_sep_rd"]) + 0.20)
 
 
-def model_poisson_total(g, f, ctx, line: float = 8.5) -> float:
+def model_poisson_total(g, f, ctx, line: float | None = None) -> float:
     if f.get("h_n_games", 0) < 5 or f.get("a_n_games", 0) < 5:
         return float("nan")
+    # The probability must be evaluated at the SAME line that will settle it:
+    # a source-observed line when verified, otherwise the strategy's model
+    # hypothesis line (never presented as a sportsbook price).
+    if line is None:
+        observed = f.get("observed_total_line")
+        line = float(observed) if _num(observed) else 8.5
     lh = max(0.5, float(f["h_rs_pg"]) * float(f["a_ra_pg"]) / 4.5)
     la = max(0.5, float(f["a_rs_pg"]) * float(f["h_ra_pg"]) / 4.5)
-    # P(X+Y > line), with no market line implied: line is a model hypothesis
-    # and must not be confused with an observed sportsbook total.
     limit = 40
     total_prob = 0.0
     for i in range(limit + 1):
@@ -118,11 +122,106 @@ def model_market(g, f, ctx) -> float:
     return h
 
 
+def _logit_clip(p: float) -> float:
+    return _logit(p)
+
+
+def _sigmoid(x: float) -> float:
+    return _sig(x)
+
+
+def _online_adjust(f: dict, ctx: dict, env_key: str, x: float | None) -> float | None:
+    """Online single-coefficient logistic adjustor over an Elo logit offset.
+
+    The coefficient starts at 0 (pure baseline) and is updated AFTER each
+    completed game by plain SGD on log loss, so a prediction only ever uses
+    coefficients fit on strictly earlier games (point-in-time safe).
+    Returns None when the feature is unavailable.
+    """
+    if x is None or not _num(x) or not _num(f.get("p_elo")):
+        return None
+    store = ctx.setdefault("online_coefs", {})
+    slot = store.setdefault(env_key, {"w": 0.0, "n": 0})
+    return float(slot["w"])
+
+
+def _online_update(ctx: dict, env_key: str, x: float, p_model_home: float,
+                   home_won: int, l2: float = 0.01) -> None:
+    """Post-game SGD step for the online coefficient (never sees future data)."""
+    if not (_num(x) and _num(p_model_home)):
+        return
+    store = ctx.setdefault("online_coefs", {})
+    slot = store.setdefault(env_key, {"w": 0.0, "n": 0})
+    err = p_model_home - home_won          # d log-loss / d logit
+    n = slot["n"]
+    lr = 0.05 / (1.0 + n / 2000.0)
+    slot["w"] = float(np.clip(slot["w"] - lr * (err * x + l2 * slot["w"]), -1.5, 1.5))
+    slot["n"] = n + 1
+
+
+def model_bullpen(g, f, ctx) -> float:
+    """Elo adjusted by point-in-time bullpen workload differential.
+
+    x = (away bullpen batters faced last 3 team games − home's)/10: a more
+    worked away bullpen is hypothesized to help the home side.  The sign and
+    size are LEARNED online from earlier completed games, never assumed.
+    """
+    base = model_elo(g, f, ctx)
+    if not _num(base):
+        return float("nan")
+    bh, ba = f.get("h_bp_bf_l3"), f.get("a_bp_bf_l3")
+    if not (_num(bh) and _num(ba)):
+        return float("nan")
+    env = "POST" if pd.notna(getattr(g, "round_code", np.nan)) else "REG"
+    w = _online_adjust(f, ctx, f"bp_{env}", 1.0)
+    x = (float(ba) - float(bh)) / 10.0
+    return _sigmoid(_logit_clip(min(max(base, 1e-6), 1 - 1e-6)) + (w or 0.0) * x)
+
+
+def model_rest(g, f, ctx) -> float:
+    """Elo adjusted by rest-day differential (home − away), coefficient learned."""
+    base = model_elo(g, f, ctx)
+    if not _num(base):
+        return float("nan")
+    rh, ra = f.get("rest_home"), f.get("rest_away")
+    if not (_num(rh) and _num(ra)):
+        return float("nan")
+    env = "POST" if pd.notna(getattr(g, "round_code", np.nan)) else "REG"
+    w = _online_adjust(f, ctx, f"rest_{env}", 1.0)
+    x = (float(rh) - float(ra))
+    x = max(min(x, 4.0), -4.0)
+    return _sigmoid(_logit_clip(min(max(base, 1e-6), 1 - 1e-6)) + (w or 0.0) * x)
+
+
+def model_market_move(g, f, ctx) -> float:
+    """Open line adjusted by observed open→close movement (known at first pitch).
+
+    Entry is at the close: both the opening price and the closing price are
+    available at the decision timestamp, so the movement feature carries no
+    look-ahead.  The coefficient on movement starts at 0 and is learned
+    online from earlier completed games.
+    """
+    if not f.get("market_quote_verified", False):
+        return float("nan")
+    from ..config import am_to_prob, devig_two
+    h_open, a_open = devig_two(am_to_prob(f.get("home_odds")), am_to_prob(f.get("away_odds")))
+    h_close, a_close = devig_two(am_to_prob(f.get("market_close_home_odds")),
+                                 am_to_prob(f.get("market_close_away_odds")))
+    if not all(_num(v) for v in (h_open, h_close)):
+        return float("nan")
+    env = "POST" if pd.notna(getattr(g, "round_code", np.nan)) else "REG"
+    w = _online_adjust(f, ctx, f"mv_{env}", 1.0)
+    movement = float(h_close) - float(h_open)   # positive = closed harder on home
+    base_logit = _logit_clip(min(max(float(h_close), 1e-6), 1 - 1e-6))
+    return _sigmoid(base_logit + (w or 0.0) * movement * 4.0)
+
+
 MODELS: dict[str, Callable] = {
     "elo": model_elo, "form": model_form, "season": model_season,
     "lateform": model_lateform, "poisson_total": model_poisson_total,
     "hierarchical": model_hierarchical, "round_specific": model_round_specific,
-    "xreg": model_xreg, "market": model_market,
+    "xreg": model_xreg, "market": model_market, "bullpen": model_bullpen,
+    "rest": model_rest, "market_move": model_market_move,
 }
 
 
@@ -178,7 +277,16 @@ class Strategy:
             return None
         p_home = min(max(p_home, 1e-6), 1 - 1e-6)
         if self.market in {"TOTAL", "F5_TOTAL", "TEAM_TOTAL"}:
-            line = float(self.extra.get("line", 8.5))
+            # Use the source-observed line when one exists (EVAL settlement);
+            # the strategy default is a model hypothesis line, never a claim
+            # about an unobserved sportsbook total.
+            observed_line = f.get("observed_total_line")
+            if _num(observed_line) and f.get("ou_line_source"):
+                line = float(observed_line)
+                from_source = True
+            else:
+                line = float(self.extra.get("line", 8.5))
+                from_source = False
             p_over = p_home
             selection = "OVER" if p_over >= 0.5 else "UNDER"
             p_selection = p_over if selection == "OVER" else 1.0 - p_over
@@ -186,14 +294,17 @@ class Strategy:
                 return None
             return {"selection": f"{selection} {line:g}", "p_model": p_selection,
                     "fair_price": p_selection, "required_price": prob_to_am(p_selection),
-                    "market": self.market, "line": line, "edge": None}
+                    "market": self.market, "line": line, "edge": None,
+                    "observed_line": line if from_source else None,
+                    "price_tier": None}
         selection = "HOME" if p_home >= 0.5 else "AWAY"
         p_selection = p_home if selection == "HOME" else 1.0 - p_home
         # The price gate is applied by the runner against a quote.  A no-price
         # prediction can still be evaluated for Brier/log-loss.
         return {"selection": selection, "p_model": p_selection,
                 "fair_price": p_selection, "required_price": prob_to_am(p_selection),
-                "market": self.market, "edge": None}
+                "market": self.market, "edge": None,
+                "price_tier": self.extra.get("price_tier", "open")}
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
@@ -231,10 +342,18 @@ def build_catalog() -> list[Strategy]:
            "Pitcher/batter handedness and pitch-quality splits are predictive pre-game.", ("starting_pitchers", "statistics.splits"), status="DATA_UNAVAILABLE"),
         _s("MLB_REG_PITCH_MIX_001", "Pitch mix and velocity", "REG", "elo", "ML",
            "Recent pitch mix/velocity changes adjust starter expectations.", ("statcast.pitch_level",), status="DATA_UNAVAILABLE"),
-        _s("MLB_REG_BULLPEN_001", "Bullpen availability", "REG", "elo", "ML",
-           "Reliever workload and high-leverage availability improve full-game forecasts.", ("bullpen_usage",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_BULLPEN_001", "Bullpen workload", "REG", "bullpen", "ML",
+           "Point-in-time bullpen workload (batters faced over the last three team "
+           "games, play-by-play derived) adjusts the team-strength baseline; the "
+           "coefficient is learned online from strictly earlier games.",
+           ("games.scores", "bullpen_usage")),
         _s("MLB_REG_BULLPEN_FATIGUE_001", "Bullpen fatigue", "REG", "elo", "ML",
-           "Back-to-back and recent pitch workload affect late-game win probability.", ("bullpen_usage",), status="DATA_UNAVAILABLE"),
+           "Back-to-back usage plus official pitch counts affect late-game win probability.",
+           ("bullpen_usage", "statistics.pitch_counts"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_REST_001", "Rest differential", "REG", "rest", "ML",
+           "Days since each team's last completed game adjust the baseline; the "
+           "coefficient is learned online from strictly earlier games.",
+           ("games.scores", "schedule")),
         _s("MLB_REG_LEVERAGE_001", "High-leverage reliever usage", "REG", "elo", "ML",
            "Available high-leverage relievers matter after the starter exits.", ("bullpen_usage", "statistics.leverage"), status="DATA_UNAVAILABLE"),
         _s("MLB_REG_LINEUP_001", "Confirmed lineup strength", "REG", "elo", "ML",
@@ -253,14 +372,21 @@ def build_catalog() -> list[Strategy]:
            "Park and roof effects improve a run-distribution forecast.", ("venues", "weather"), status="DATA_UNAVAILABLE"),
         _s("MLB_REG_UMPIRE_001", "Umpire zone", "REG", "elo", "TOTAL",
            "Timestamped umpire assignments and zone tendencies affect totals.", ("umpires", "statistics.zone"), status="DATA_UNAVAILABLE"),
-        _s("MLB_REG_REST_001", "Rest and travel", "REG", "elo", "ML",
-           "Rest, distance and time-zone changes affect team performance.", ("travel_rest", "schedule"), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_TRAVEL_001", "Travel distance", "REG", "elo", "ML",
+           "Distance and time-zone changes beyond rest days affect team performance.",
+           ("travel_rest", "schedule"), status="DATA_UNAVAILABLE"),
         _s("MLB_REG_SCHEDULE_001", "Scheduling spots", "REG", "elo", "ML",
            "Getaway days, doubleheaders and opponent sequence create measurable effects.", ("schedule",), status="DATA_UNAVAILABLE"),
-        _s("MLB_REG_MARKET_MOVE_001", "Opening-to-current movement", "REG", "market", "ML",
-           "Observed market movement contains information when timestamps and liquidity exist.", ("markets.moneyline.open_current",), status="DATA_UNAVAILABLE"),
+        _s("MLB_REG_MARKET_MOVE_001", "Opening-to-close movement", "REG", "market_move", "ML",
+           "Movement from the verified opening line to the close (both known at "
+           "first pitch) adds information beyond the closing price itself; entry "
+           "is at the close and the movement coefficient is learned online.",
+           ("markets.moneyline.open_current",), extra={"price_tier": "close"}),
         _s("MLB_REG_CLOSING_001", "Closing-line benchmark", "REG", "market", "ML",
-           "Closing prices are a benchmark, not a look-ahead feature at entry.", ("markets.moneyline.close",), status="DATA_UNAVAILABLE"),
+           "The de-vigged closing favorite is the market-efficiency benchmark: "
+           "calibration against it measures book hold, not a model edge. Entry is "
+           "at the closing price on verified rows only.",
+           ("markets.moneyline.close",), extra={"price_tier": "close"}, min_edge=0.0),
         _s("MLB_REG_F5_001", "First-five moneyline", "REG", "elo", "F5_ML",
            "Starter-focused probability can differ from full-game market price.", ("starting_pitchers", "markets.f5"), status="DATA_UNAVAILABLE"),
         _s("MLB_REG_F5_TOTAL_001", "First-five total", "REG", "poisson_total", "F5_TOTAL",
@@ -301,14 +427,19 @@ def build_catalog() -> list[Strategy]:
            "Game number, record, elimination, clinching and games remaining add measurable information only if they do.", ("series_state", "postseason.games"), min_edge=0.03),
         _s("MLB_POST_PITCHING_001", "Postseason pitching leash", "POST", "hierarchical", "ML",
            "Shorter leashes, starter workload and pitch mix are tested as postseason-specific features.", ("postseason.pitching",), status="DATA_UNAVAILABLE"),
-        _s("MLB_POST_BULLPEN_001", "Postseason bullpen availability", "POST", "hierarchical", "ML",
-           "High-leverage reliever availability and workload are modeled separately by round.", ("postseason.bullpen",), status="DATA_UNAVAILABLE"),
+        _s("MLB_POST_BULLPEN_001", "Postseason bullpen workload", "POST", "bullpen", "ML",
+           "Postseason bullpen workload (play-by-play derived, point-in-time) uses its "
+           "own online coefficient so the small postseason sample cannot borrow the "
+           "regular-season fit silently.", ("postseason.games", "bullpen_usage")),
         _s("MLB_POST_LINEUP_001", "Postseason lineup construction", "POST", "hierarchical", "ML",
            "Platoons, pinch hitting and defensive substitutions are measured in postseason only.", ("postseason.lineups",), status="DATA_UNAVAILABLE"),
         _s("MLB_POST_MANAGER_001", "Postseason managerial decisions", "POST", "hierarchical", "ML",
            "Managerial hook and substitution patterns are estimated without assuming a direction.", ("postseason.managerial",), status="DATA_UNAVAILABLE"),
         _s("MLB_POST_MARKET_001", "Postseason market model", "POST", "market", "ML",
-           "Postseason price movement is compared with regular-season market behavior only when observed.", ("postseason.markets",), status="DATA_UNAVAILABLE"),
+           "The de-vigged verified postseason price is compared with model probability "
+           "only where an open/close quote exists; postseason market efficiency is "
+           "measured against postseason rows, never inferred from regular-season prices.",
+           ("postseason.markets",)),
     ]
     for round_code, label in (("WC", "Wild Card"), ("DS", "Division Series"),
                               ("LCS", "League Championship Series"), ("WS", "World Series")):
@@ -320,7 +451,8 @@ def build_catalog() -> list[Strategy]:
             _s(f"MLB_POST_{round_code}_STATE_001", f"{label} series-state model", round_code, "hierarchical", "ML",
                f"{label} game number, home status and elimination state are evaluated point-in-time.", ("series_state",)),
             _s(f"MLB_POST_{round_code}_MARKET_001", f"{label} market model", round_code, "market", "ML",
-               f"{label} market efficiency is measured from observed prices, never inferred from outcomes.", ("postseason.markets",), status="DATA_UNAVAILABLE"),
+               f"{label} market efficiency is measured from observed verified prices, never inferred from outcomes.",
+               ("postseason.markets",)),
         ])
     # Explicitly expose the framework's five permanent experiments as catalog
     # rows so they can never be accidentally replaced by a single PO model.
@@ -339,6 +471,12 @@ def special_rules(sid: str, g, f, ctx, decision):
     if decision is None:
         return None
     if sid == "MLB_REG_FAV_BIAS_001":
+        # Entry requires a timestamped, verified quote.  Selecting the
+        # favorite from an untimestamped (closing) price column would let
+        # information that may not have been available at decision time
+        # choose the side — a look-ahead gate, not a strategy.
+        if not f.get("market_quote_verified", False):
+            return None
         ho, ao = f.get("home_odds"), f.get("away_odds")
         if not (_num(ho) and _num(ao)):
             return None

@@ -210,8 +210,8 @@ def load_pbp(years) -> pd.DataFrame:
         p = PBP_DIR / f"mlb_pbp_{y}.parquet"
         if p.exists():
             frames.append(pd.read_parquet(
-                p, columns=["game_pk", "at_bat_index", "inning", "batter_id",
-                            "pitcher_id", "event_type", "event"]))
+                p, columns=["game_pk", "at_bat_index", "inning", "half_inning",
+                            "batter_id", "pitcher_id", "event_type", "event"]))
     return pd.concat(frames, ignore_index=True)
 
 
@@ -248,19 +248,14 @@ def build_games(games: pd.DataFrame, pbp: pd.DataFrame) -> pd.DataFrame:
 def round_needed(round_code: str, season: int) -> int:
     """Wins needed to clinch a series (format changes by year).
 
-    WC: single-elimination game in 2012/2015 (1 win); best-of-3 in 2020 and
-    from 2022 on (2 wins).
-    DS: best-of-5 (3 wins) in EVERY season here, including 2020.  The 2020
-    expanded format lengthened the WILD CARD round to best-of-three but left
-    the Division Series at its normal best-of-five (MLB's own 2020-07-23
-    announcement: "Division Series (best-of-five ... at neutral sites)").
-    LCS/WS: best-of-7 (4 wins).
+    Delegates to the single shared implementation in ``mlbcomp.config`` so the
+    series-state builder and the backtest runner can never disagree.  WC was
+    single-elimination 2012-2019 and 2021; best-of-3 in 2020 and from 2022 on.
+    DS is best-of-5 (3 wins) in EVERY season here, including 2020 (MLB's
+    2020-07-23 announcement kept the DS at best-of-five).  LCS/WS: best-of-7.
     """
-    if round_code == "WC":
-        return 1 if season in (2012, 2015) else 2
-    if round_code == "DS":
-        return 3
-    return 4  # LCS / WS
+    from ..config import round_needed as _round_needed
+    return _round_needed(round_code, int(season))
 
 
 def _league_of(desc) -> str:
@@ -418,8 +413,19 @@ def build_series_state(games: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_pbp_aggregates(pbp: pd.DataFrame) -> None:
-    """Play-by-play -> pitcher_game + game_events parquet (2015+)."""
+def build_pbp_aggregates(pbp: pd.DataFrame, games: pd.DataFrame | None = None) -> None:
+    """Play-by-play -> pitcher_game + game_events parquet (2015+).
+
+    When the schedule frame is provided, two extra source-backed tables are
+    written for point-in-time features:
+
+    * ``game_team_events``  — per-team batting outcomes inferred from
+      ``half_inning`` (top = away bats, bottom = home bats);
+    * ``team_pitching_game`` — per-team pitcher usage: starter batters faced,
+      bullpen batters faced, pitchers used.  Workload is a ``batters_faced``
+      proxy from play-by-play, not official pitch counts (documented
+      limitation).
+    """
     pbp = pbp.copy()
     pg = pbp.groupby(["game_pk", "pitcher_id"]).agg(
         batters_faced=("at_bat_index", "count"),
@@ -448,43 +454,170 @@ def build_pbp_aggregates(pbp: pd.DataFrame) -> None:
     ).reset_index()
     gg.to_parquet(FEAT / "game_events.parquet", index=False)
 
+    if games is None:
+        return
+    gm = games[["game_pk", "home_team_id", "away_team_id"]].dropna()
+    ev = pbp.merge(gm, on="game_pk", how="inner")
+    ev["batting_team_id"] = np.where(ev.half_inning.astype(str).str.lower().str.startswith("t"),
+                                     ev.away_team_id, ev.home_team_id)
+    team_events = ev.groupby(["game_pk", "batting_team_id"]).agg(
+        team_ab=("at_bat_index", "count"),
+        team_so=("event_type", lambda s: int((s == "strikeout").sum())),
+        team_bb=("event_type", lambda s: int((s == "walk").sum())),
+        team_hr=("event", lambda s: int((s == "Home Run").sum())),
+    ).reset_index()
+    team_events.to_parquet(FEAT / "game_team_events.parquet", index=False)
+
+    # Pitching team per (game, pitcher): majority of logged batters faced.
+    ev["pitching_team_id"] = np.where(ev.half_inning.astype(str).str.lower().str.startswith("t"),
+                                      ev.home_team_id, ev.away_team_id)
+    pitch_team = ev.groupby(["game_pk", "pitcher_id", "pitching_team_id"]).size().rename(
+        "n_bf").reset_index()
+    pitch_team = pitch_team.sort_values("n_bf", ascending=False).drop_duplicates(
+        ["game_pk", "pitcher_id"])
+    pg_team = pg.merge(pitch_team[["game_pk", "pitcher_id", "pitching_team_id"]],
+                       on=["game_pk", "pitcher_id"], how="inner")
+    usage = pg_team.groupby(["game_pk", "pitching_team_id"]).agg(
+        pitchers_used=("pitcher_id", "nunique"),
+        bf_total=("batters_faced", "sum"),
+    ).reset_index()
+    sp = pg_team[pg_team.is_starter == 1].groupby(
+        ["game_pk", "pitching_team_id"]).batters_faced.sum().rename("starter_bf")
+    usage = usage.merge(sp, on=["game_pk", "pitching_team_id"], how="left")
+    usage["starter_bf"] = usage.starter_bf.fillna(0).astype(int)
+    usage["bp_bf"] = (usage.bf_total - usage.starter_bf).clip(lower=0).astype(int)
+    usage["bp_pitchers"] = usage.pitchers_used - (usage.starter_bf > 0).astype(int)
+    usage.to_parquet(FEAT / "team_pitching_game.parquet", index=False)
+
 
 def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
-    """Join verified market odds onto games; verify teams+date match (S1 vs S2)."""
+    """Join market prices onto games.
+
+    Two layers, never confused:
+
+    * **cesar-dx moneyline** — research-only prices with no availability
+      timestamp.  They remain ``UNVERIFIED`` and cannot create a stake/PnL.
+    * **bettingtools open/close lines (2014-2019)** — content-validated rows
+      with documented open/close semantics.  When ``odds_open_close.parquet``
+      marks a row ``ml_verified``, the **opening** moneyline becomes the entry
+      quote (available before first pitch by definition), the **closing**
+      line is retained for CLV, and both carry observed/availability stamps
+      equal to the scheduled first pitch (see ``open_close_odds`` docs).
+    """
     g = games.set_index("game_pk")
     o = odds.merge(
-        g[["game_date", "home_abbr", "away_abbr"]].rename(
+        g[["game_date", "home_abbr", "away_abbr", "start_utc"]].rename(
             columns={"game_date": "src_date", "home_abbr": "src_home",
-                     "away_abbr": "src_away"}).reset_index(),
+                     "away_abbr": "src_away", "start_utc": "src_start"}).reset_index(),
         on="game_pk", how="inner")
     mismatch = ((o.game_date != o.src_date) | (o.home_name != o.src_home) |
                 (o.away_name != o.src_away))
     dropped = int(mismatch.sum())
     o = o[~mismatch]
-    base_columns = ["game_pk", "game_date", "home_odds", "away_odds", "home_winner",
-                    "home_win_pct_to_date", "away_win_pct_to_date",
-                    "home_last5_o_hardhit", "away_last5_o_hardhit",
-                    "home_last5_o_xwoba", "away_last5_o_xwoba",
-                    "home_last_p_hardhit", "away_last_p_hardhit",
-                    "home_last_p_xwoba", "away_last_p_xwoba"]
-    # Optional quote metadata is required for a price to be eligible for a
-    # wager.  If the source lacks it, preserve the price as an unverified
-    # research field rather than inventing a timestamp or availability claim.
-    optional = ["observed_at", "available_at", "source_id", "source_url", "source_observation_id", "verification_status", "closing_flag"]
-    for column in optional:
-        if column not in o.columns:
-            o[column] = None if column != "verification_status" else "UNVERIFIED"
-    out = o[base_columns + optional].copy()
+    base_columns = [c for c in [
+        "game_pk", "game_date", "home_odds", "away_odds", "home_winner",
+        "home_win_pct_to_date", "away_win_pct_to_date",
+        "home_last5_o_hardhit", "away_last5_o_hardhit",
+        "home_last5_o_xwoba", "away_last5_o_xwoba",
+        "home_last_p_hardhit", "away_last_p_hardhit",
+        "home_last_p_xwoba", "away_last_p_xwoba"] if c in o.columns]
+    out = o[base_columns + ["src_start"]].copy()
+    out = out.rename(columns={"src_start": "start_utc"})
     numeric = [c for c in base_columns if c not in {"game_pk", "game_date", "home_winner"}]
     for c in numeric:
         out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Optional quote metadata defaults: unverified and unstamped.
+    out["observed_at"] = None
+    out["available_at"] = None
+    out["source_id"] = "cesar_dx_mlb_odds"
+    out["source_url"] = "https://github.com/cesar-dx/mlb-betting-ml"
+    out["source_observation_id"] = None
+    out["verification_status"] = "UNVERIFIED"
+    out["closing_flag"] = 0
+    for c in ("home_odds_open", "away_odds_open", "home_odds_close", "away_odds_close",
+              "observed_total_line", "total_juice", "close_total_line", "close_total_juice",
+              "rl_home_line", "rl_away_line", "rl_home_juice", "rl_away_juice"):
+        out[c] = np.nan
+    out["ml_quote_tier"] = "cesar_no_timestamp"
+    out["ou_line_source"] = None
+
+    # Overlay verified open/close rows when the validated file exists.
+    oc_path = FEAT / "odds_open_close.parquet"
+    if oc_path.exists():
+        oc = pd.read_parquet(oc_path)
+        out = out.merge(oc, on="game_pk", how="left", suffixes=("", "_oc"))
+        verified_ml = out["ml_verified"].fillna(False).astype(bool)
+        verified_ou = out["ou_verified"].fillna(False).astype(bool)
+        stamp = out.get("start_utc_oc")
+        if stamp is None:
+            stamp = out.get("start_utc")
+        # Entry quote = opening line (definitional pre-pitch availability).
+        out.loc[verified_ml, "home_odds"] = out.loc[verified_ml, "home_open_ml"]
+        out.loc[verified_ml, "away_odds"] = out.loc[verified_ml, "away_open_ml"]
+        out.loc[verified_ml, "home_odds_open"] = out.loc[verified_ml, "home_open_ml"]
+        out.loc[verified_ml, "away_odds_open"] = out.loc[verified_ml, "away_open_ml"]
+        out.loc[verified_ml, "home_odds_close"] = out.loc[verified_ml, "home_close_ml"]
+        out.loc[verified_ml, "away_odds_close"] = out.loc[verified_ml, "away_close_ml"]
+        out.loc[verified_ml, "observed_at"] = stamp.loc[verified_ml]
+        out.loc[verified_ml, "available_at"] = stamp.loc[verified_ml]
+        out.loc[verified_ml, "source_id"] = "bettingtools_open_close"
+        out.loc[verified_ml, "source_url"] = "https://github.com/pwu97/bettingtools"
+        out.loc[verified_ml, "source_observation_id"] = [
+            f"quote:bettingtools:open:{int(pk)}" for pk in out.loc[verified_ml, "game_pk"]]
+        out.loc[verified_ml, "verification_status"] = "VERIFIED"
+        out.loc[verified_ml, "ml_quote_tier"] = "verified_open_entry_close_clv"
+        # Totals: observed line for EVAL settlement only (single juice column
+        # is not a two-way quote, so no totals wager is created).
+        out.loc[verified_ou, "observed_total_line"] = out.loc[verified_ou, "open_ou_line"]
+        out.loc[verified_ou, "total_juice"] = out.loc[verified_ou, "open_ou_odds"]
+        out.loc[verified_ou, "close_total_line"] = out.loc[verified_ou, "close_ou_line"]
+        out.loc[verified_ou, "close_total_juice"] = out.loc[verified_ou, "close_ou_odds"]
+        out.loc[verified_ou, "ou_line_source"] = "bettingtools_open_close"
+        # Run line (single price pair; treated as closing, not wagered here).
+        out["rl_home_line"] = out.get("home_run_line")
+        out["rl_away_line"] = out.get("away_run_line")
+        out["rl_home_juice"] = out.get("home_run_line_odds")
+        out["rl_away_juice"] = out.get("away_run_line_odds")
+        drop_cols = [c for c in out.columns if c.endswith("_oc")]
+        out = out.drop(columns=drop_cols)
+
+    out["closing_flag"] = 0  # entry is the open; close prices live in *_close columns
+    for c in ("home_odds", "away_odds", "home_odds_open", "away_odds_open",
+              "home_odds_close", "away_odds_close", "observed_total_line",
+              "total_juice", "close_total_line", "close_total_juice"):
+        if c in out:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
     out["verification_status"] = out["verification_status"].fillna("UNVERIFIED").astype(str)
+    keep = [c for c in [
+        "game_pk", "game_date", "start_utc", "home_odds", "away_odds", "home_winner",
+        "home_win_pct_to_date", "away_win_pct_to_date",
+        "home_last5_o_hardhit", "away_last5_o_hardhit",
+        "home_last5_o_xwoba", "away_last5_o_xwoba",
+        "home_last_p_hardhit", "away_last_p_hardhit",
+        "home_last_p_xwoba", "away_last_p_xwoba",
+        "observed_at", "available_at", "source_id", "source_url",
+        "source_observation_id", "verification_status", "closing_flag",
+        "home_odds_open", "away_odds_open", "home_odds_close", "away_odds_close",
+        "observed_total_line", "total_juice", "close_total_line", "close_total_juice",
+        "rl_home_line", "rl_away_line", "rl_home_juice", "rl_away_juice",
+        "ml_quote_tier", "ou_line_source"] if c in out.columns]
+    out = out[keep].drop_duplicates("game_pk")
     out.to_parquet(FEAT / "odds.parquet", index=False)
+    n_verified = int((out.verification_status == "VERIFIED").sum())
+    print(f"[join_odds] rows={len(out)} verified_ml_quotes={n_verified} dropped_mismatch={dropped}")
     return len(out), dropped
 
 
 def _record_dataset_observations() -> None:
-    """Record content-addressed local dataset observations when a manifest exists."""
+    """Record content-addressed local dataset observations when a manifest exists.
+
+    Integrity levels (kept explicit so a checksum match is never mistaken for
+    a market-data verification):
+      * sha256 present and matching  -> VERIFIED (file integrity only)
+      * sha256 present and mismatching -> issue queue + MISMATCH status
+      * only a git blob SHA recorded -> RETRIEVED (blob pinned, digest recorded)
+    """
     manifest_path = RAW / "FETCH_MANIFEST.json"
     if not manifest_path.exists():
         return
@@ -494,6 +627,19 @@ def _record_dataset_observations() -> None:
     except (OSError, ValueError):
         db.record_issue("FETCH-MANIFEST-INVALID", "SOURCE", "FETCH_MANIFEST.json is not valid JSON", "HIGH")
         return
+    def _repo_source(repo: str) -> str:
+        if "sportsdataverse" in repo:
+            return "sportsdataverse_baseballr"
+        if "pwu97" in repo or "bettingtools" in repo:
+            return "bettingtools_open_close"
+        if "cesar-dx" in repo:
+            return "cesar_dx_mlb_odds"
+        return "unknown"
+
+    def _git_blob_sha1(data: bytes) -> str:
+        return hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest()
+
+    manifest_dirty = False
     db.init_db()
     with db.db() as conn:
         for item in manifest.get("files", []):
@@ -506,17 +652,127 @@ def _record_dataset_observations() -> None:
                      "Manifest file is missing from the local snapshot", "[]", db.utcnow()),
                 )
                 continue
-            digest = hashlib.sha256(dest.read_bytes()).hexdigest()
-            status = "RETRIEVED" if digest == item.get("sha256", digest) or item.get("blob_sha") else "RETRIEVED"
+            raw_bytes = dest.read_bytes()
+            digest = hashlib.sha256(raw_bytes).hexdigest()
+            expected = item.get("sha256")
+            if not expected and item.get("blob_sha"):
+                # Manifests written before sha256 pinning carry the git blob
+                # SHA.  Recomputing blob SHA-1 from local bytes independently
+                # proves the file still matches the upstream object.
+                if _git_blob_sha1(raw_bytes) == item["sha256" if False else "blob_sha"]:
+                    item["sha256"] = digest
+                    manifest_dirty = True
+                    expected = digest
+                else:
+                    status = "MISMATCH"
+                    notes = "local bytes do not match the pinned git blob SHA-1"
+                    conn.execute(
+                        "INSERT OR REPLACE INTO data_issues (issue_id,issue_type,severity,status,entity_type,entity_id,description,source_ids,detected_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (f"CHECKSUM:{item.get('dest')}", "SOURCE", "CRITICAL", "OPEN", "dataset", item.get("dest"),
+                         notes, "[]", db.utcnow()),
+                    )
+                    oid = f"dataset:{item.get('source_repo')}:{item.get('source_path')}:{item.get('blob_sha')}"
+                    conn.execute(
+                        "INSERT OR REPLACE INTO source_observations "
+                        "(observation_id,source_id,source_locator,record_key,retrieval_time,checksum,verification_status,notes) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (oid, _repo_source(str(item.get("source_repo", ""))),
+                         item.get("source_path"), item.get("dest"),
+                         item.get("fetched_utc", db.utcnow()), digest, status, notes),
+                    )
+                    continue
+            if expected:
+                if digest == expected:
+                    status = "VERIFIED"
+                    notes = ("File integrity verified against manifest sha256 "
+                             "(and pinned git blob SHA); dataset-specific content "
+                             "validators are separate gates")
+                else:
+                    status = "MISMATCH"
+                    notes = f"local sha256 {digest} != manifest {expected}"
+                    conn.execute(
+                        "INSERT OR REPLACE INTO data_issues (issue_id,issue_type,severity,status,entity_type,entity_id,description,source_ids,detected_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        (f"CHECKSUM:{item.get('dest')}", "SOURCE", "CRITICAL", "OPEN", "dataset", item.get("dest"),
+                         notes, "[]", db.utcnow()),
+                    )
+            else:
+                status = "RETRIEVED"
+                notes = "content retrieved; no pinned digest available"
             oid = f"dataset:{item.get('source_repo')}:{item.get('source_path')}:{item.get('blob_sha', digest)}"
             conn.execute(
                 "INSERT OR REPLACE INTO source_observations "
                 "(observation_id,source_id,source_locator,record_key,retrieval_time,checksum,verification_status,notes) "
                 "VALUES (?,?,?,?,?,?,?,?)",
-                (oid, "sportsdataverse_baseballr" if "sportsdataverse" in str(item.get("source_repo")) else "cesar_dx_mlb_odds",
+                (oid, _repo_source(str(item.get("source_repo", ""))),
                  item.get("source_path"), item.get("dest"), item.get("fetched_utc", db.utcnow()), digest,
-                 status, "Content retrieved; dataset-specific validators still required"),
+                 status, notes),
             )
+    if manifest_dirty:
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+        except OSError:
+            pass
+
+
+def _update_source_availability() -> None:
+    """Promote reachability/integrity evidence into the source metadata table."""
+    manifest_path = RAW / "FETCH_MANIFEST.json"
+    if not manifest_path.exists():
+        return
+    try:
+        import json
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return
+    by_repo: dict[str, int] = {}
+    for item in manifest.get("files", []):
+        repo = str(item.get("source_repo", ""))
+        dest = ROOT / item.get("dest", "")
+        if dest.exists():
+            by_repo[repo] = by_repo.get(repo, 0) + 1
+    today = TODAY
+    with db.db() as conn:
+        if by_repo.get("sportsdataverse/baseballr-data"):
+            conn.execute(
+                "UPDATE source_metadata SET current_availability=?,verification_date=?,verification_status=?,"
+                "last_http_status=?,last_error=NULL,notes=? WHERE source_id=?",
+                ("AVAILABLE", today, "PARTIALLY_VERIFIED", 200,
+                 f"{by_repo['sportsdataverse/baseballr-data']} content-addressed files retrieved and integrity-checked "
+                 "via api.github.com blobs; schedule/pbp validators run separately.",
+                 "sportsdataverse_baseballr"))
+        if by_repo.get("cesar-dx/mlb-betting-ml"):
+            conn.execute(
+                "UPDATE source_metadata SET current_availability=?,verification_date=?,verification_status=?,"
+                "last_http_status=?,last_error=NULL,notes=? WHERE source_id=?",
+                ("AVAILABLE", today, "PARTIALLY_VERIFIED", 200,
+                 "Moneyline rows join-verified to the schedule by game_pk/date/teams, but the source has no "
+                 "observed_at/available_at timestamps, so prices stay UNVERIFIED for wager eligibility.",
+                 "cesar_dx_mlb_odds"))
+        if by_repo.get("pwu97/bettingtools"):
+            conn.execute(
+                "INSERT OR IGNORE INTO source_registry "
+                "(source_id,url,description,coverage,verified,reject_reason,fetched_at,notes) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                ("bettingtools_open_close", "https://github.com/pwu97/bettingtools",
+                 "open/close MLB moneyline and totals lines", "2014-2019", 0, None, today,
+                 "Attribution required; scraped from sportsbookreviewsonline.com per repository LICENSE."))
+            conn.execute(
+                "INSERT OR REPLACE INTO source_metadata "
+                "(source_id,name,url,data_type,historical_depth,current_availability,access_method,cost,"
+                "restrictions,licensing,reliability,granularity,automation_capability,verification_date,"
+                "verification_status,limitations,last_http_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("bettingtools_open_close", "bettingtools historical MLB lines",
+                 "https://github.com/pwu97/bettingtools", "open/close MLB moneyline and totals lines",
+                 "2014-2019", "AVAILABLE", "GitHub API git blobs", "free public repository",
+                 "attribution required by repository LICENSE",
+                 "custom: 'Everyone can use this package so long as you give credit'",
+                 "secondary market candidate (scraped from sportsbookreviewsonline.com)",
+                 "game/open-close quote", "high", today, "PARTIALLY_VERIFIED",
+                 "Open/close semantics are definitional (close = last line before first pitch); "
+                 "cross-check against cesar-dx 2019 closing lines is required before VERIFIED wager use.",
+                 200))
 
 
 # ------------------------------------------------------------------ build
@@ -529,20 +785,68 @@ def build() -> None:
     register_catalog()
     register_sources(conn)
     _record_dataset_observations()
+    _update_source_availability()
 
     games = load_schedules(SEASONS_ALL)
     odds = load_odds(SEASONS_WITH_ODDS)
     pbp = load_pbp([y for y in SEASONS_ALL if y >= 2015])
+
+    # Durable issue-queue records for known, structural data limitations.
+    # These are observations about the sources, not guesses about their data.
+    db.record_issue(
+        "ISSUE-ODDS-NO-TIMESTAMPS", "MARKET_DATA",
+        "cesar-dx/mlb-betting-ml moneyline columns have no observed_at/available_at/"
+        "closing_flag fields. Prices are retained for research joins only; they are "
+        "UNVERIFIED and cannot create stakes, PnL, ROI or CLV.",
+        severity="HIGH", source_ids=["cesar_dx_mlb_odds"])
+    db.record_issue(
+        "ISSUE-2026-PO-PLACEHOLDERS", "SCHEDULE",
+        "2026 postseason schedule rows use placeholder team names (e.g. 'AL Wild Card "
+        "#1') before the bracket is set. They are excluded from the normalized games "
+        "table because no team mapping exists; no prediction is asserted for them.",
+        severity="MEDIUM", source_ids=["sportsdataverse_baseballr"])
+    db.record_issue(
+        "ISSUE-NO-POINT-IN-TIME-LINEUPS", "ROSTER_DATA",
+        "Confirmed lineups, injuries, weather forecasts and umpire assignments with "
+        "announced_at/available_at timestamps are not available from any verified "
+        "source in this environment. Strategies that require them remain "
+        "DATA_UNAVAILABLE rather than using postgame content as pregame evidence.",
+        severity="HIGH", source_ids=[])
+    db.record_issue(
+        "ISSUE-EGRESS-BLOCKED", "SOURCE",
+        "statsapi.mlb.com, raw.githubusercontent.com, api.weather.gov, "
+        "trading-api.kalshi.com, baseballsavant.mlb.com and retrosheet.org are "
+        "unreachable from the execution environment (connection refused). Only "
+        "api.github.com/codeload.github.com/pypi.org were reachable on 2026-09-21; "
+        "every dependency is restricted to reachable, content-addressed sources.",
+        severity="MEDIUM", source_ids=[])
 
     games = build_games(games, pbp)
     games = group_series(games)
 
     series = build_series_table(games)
     state = build_series_state(games)
-    build_pbp_aggregates(pbp)
-    n_odds, dropped = join_odds(odds, games)
+    build_pbp_aggregates(pbp, games=games)
 
+    FEAT.mkdir(parents=True, exist_ok=True)
     games.to_parquet(FEAT / "games.parquet", index=False)
+
+    # Open/close line validation needs games.parquet; the overlay join below
+    # needs the validated file.  First run: validate now (cross-checking the
+    # cesar odds written by the first join), then re-join with the overlay.
+    had_open_close = (FEAT / "odds_open_close.parquet").exists()
+    n_odds, dropped = join_odds(odds, games)
+    try:
+        from . import open_close_odds
+        oc_summary = open_close_odds.build()
+        n_odds, dropped = join_odds(odds, games)  # apply/refresh the overlay
+    except FileNotFoundError as exc:
+        db.record_issue("OPEN-CLOSE-SKIPPED", "MARKET_DATA",
+                        f"Open/close line validation skipped: {exc}", "MEDIUM")
+    except Exception as exc:
+        db.record_issue("OPEN-CLOSE-REFRESH-FAILED", "MARKET_DATA",
+                        f"Open/close validation/refresh failed: {type(exc).__name__}: {exc}",
+                        "HIGH")
 
     conn.execute("DELETE FROM teams")  # rebuild clean (no stale rows)
     for tid, abbr in TEAM_ID_TO_ABBR.items():

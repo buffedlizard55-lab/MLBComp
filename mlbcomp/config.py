@@ -33,7 +33,32 @@ ROUND_LABEL = {
     "LCS": "League Championship Series",
     "WS": "World Series",
 }
-ROUND_FORMAT = {"WC": "BO3", "DS": "BO5", "LCS": "BO7", "WS": "BO7"}
+
+
+def round_needed(round_code: str, season: int) -> int:
+    """Wins required to clinch a postseason series (format changes by year).
+
+    Source: MLB official postseason format history (mlb.com/news/mlb-playoff-
+    format-faq, verified 2026-09-21): the single-elimination Wild Card Game
+    was used 2012-2019 and again in 2021; the best-of-three Wild Card Series
+    debuted in the expanded 2020 postseason and returned permanently in 2022.
+    DS is best-of-5 and LCS/WS best-of-7 in every season in scope (the 2020 DS
+    remained best-of-five at neutral sites per MLB's 2020-07-23 announcement).
+    """
+    if round_code == "WC":
+        if season == 2020 or season >= 2022:
+            return 2
+        return 1
+    if round_code == "DS":
+        return 3
+    if round_code in {"LCS", "WS"}:
+        return 4
+    raise ValueError(f"unknown postseason round {round_code!r}")
+
+
+def round_format_label(round_code: str, season: int) -> str:
+    n = round_needed(round_code, season)
+    return {1: "BO1", 2: "BO3", 3: "BO5", 4: "BO7"}[n]
 
 # Environments are intentionally not aliases.  POST is the all-round
 # postseason competition; WC/DS/LCS/WS are four separate competitions.

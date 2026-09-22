@@ -123,16 +123,72 @@ class TeamState:
 
 # ------------------------------------------------------------------ events
 def game_event_rates(events: pd.DataFrame, games: pd.DataFrame) -> dict:
-    """(game_pk, team_id) -> (so_rate, bb_rate, hr_rate) share of team at-bats."""
+    """(game_pk, team_id) -> (so_rate, bb_rate, hr_rate) share of team at-bats.
+
+    Prefers ``game_team_events`` (true per-team splits inferred from
+    ``half_inning``).  The legacy fallback divides game-level totals equally
+    between both sides, which is kept only for checkouts missing the newer
+    table and is explicitly a team-indifferent approximation.
+    """
+    out: dict = {}
+    team_path = FEAT / "game_team_events.parquet"
+    if team_path.exists():
+        te = pd.read_parquet(team_path)
+        for r in te.itertuples():
+            ab = max(1, int(r.team_ab))
+            out[(int(r.game_pk), int(r.batting_team_id))] = (
+                r.team_so / ab, r.team_bb / ab, r.team_hr / ab)
+        return out
     ev = events.merge(games[["game_pk", "home_team_id", "away_team_id"]],
                       on="game_pk", how="inner")
-    out = {}
     for r in ev.itertuples():
         ab = max(1, int(r.total_ab))
         share = (r.total_so / ab / 2.0, r.total_bb / ab / 2.0, r.total_hr / ab / 2.0)
         out[(r.game_pk, int(r.home_team_id))] = share
         out[(r.game_pk, int(r.away_team_id))] = share
     return out
+
+
+# ---------------------------------------------------------------- workload
+class PitchingWorkloadState:
+    """Point-in-time team pitching workload from play-by-play.
+
+    After each completed game the pitching line (starter batters faced,
+    bullpen batters faced, pitchers used) is appended to per-team windows.
+    Features for a game at time T read only games completed before T.
+    Workload is a ``batters_faced`` proxy from the source play-by-play, not
+    an official pitch count.
+    """
+
+    def __init__(self, bp_window: int = 3, sp_window: int = 5):
+        self.bp_window = bp_window
+        self.sp_window = sp_window
+        self.history: dict[int, deque] = {}
+        self.last_lines: dict[int, dict] = {}
+
+    def record(self, team: int, line: dict) -> None:
+        self.history.setdefault(team, deque(maxlen=max(self.bp_window, self.sp_window))).append(line)
+        self.last_lines[team] = line
+
+    def features(self, team: int) -> dict:
+        hist = list(self.history.get(team, ()))
+        bp_recent = sum(x["bp_bf"] for x in hist[-self.bp_window:])
+        sp_recent = [x["starter_bf"] for x in hist[-self.sp_window:]]
+        last = hist[-1] if hist else None
+        return {
+            "bp_bf_l3": bp_recent if hist else np.nan,
+            "sp_bf_l5_avg": float(np.mean(sp_recent)) if sp_recent else np.nan,
+            "pitchers_used_l1": last["pitchers_used"] if last else np.nan,
+            "bp_bf_l1": last["bp_bf"] if last else np.nan,
+            "starter_bf_l1": last["starter_bf"] if last else np.nan,
+        }
+
+
+def load_team_pitching_usage() -> pd.DataFrame | None:
+    path = FEAT / "team_pitching_game.parquet"
+    if not path.exists():
+        return None
+    return pd.read_parquet(path)
 
 
 # ------------------------------------------------------------------ main
@@ -149,6 +205,18 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
     state_reg = TeamState(window=30)
     state_post = TeamState(window=30)
     state_sep = TeamState(window=15)   # late-season form (September REG only)
+    workload = PitchingWorkloadState()
+
+    usage = load_team_pitching_usage()
+    usage_map: dict[int, list[dict]] = {}
+    if usage is not None and len(usage):
+        for r in usage.itertuples():
+            usage_map.setdefault(int(r.game_pk), []).append({
+                "team": int(r.pitching_team_id),
+                "bp_bf": int(r.bp_bf),
+                "starter_bf": int(r.starter_bf),
+                "pitchers_used": int(r.pitchers_used),
+            })
 
     odds_map = {}
     if odds is not None and len(odds):
@@ -191,6 +259,11 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
             ra_ = state_post.rest_days(a, game_date) if is_post else None
             f["rest_home"] = rh if rh is not None else state_reg.rest_days(h, game_date)
             f["rest_away"] = ra_ if ra_ is not None else state_reg.rest_days(a, game_date)
+            # Point-in-time pitching workload (completed games only).
+            wl_h = workload.features(h)
+            wl_a = workload.features(a)
+            f.update({f"h_{k}": v for k, v in wl_h.items()})
+            f.update({f"a_{k}": v for k, v in wl_a.items()})
         # Market odds (if this game has verified, timestamped quote metadata).
         o = odds_map.get(g.game_pk)
         if o is not None:
@@ -211,8 +284,23 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
                 and bool(f["market_quote_observed_at"])
                 and bool(f["market_quote_available_at"])
             )
+            # Closing prices (CLV benchmark) and observed totals line.
+            f["market_close_home_odds"] = getattr(o, "home_odds_close", np.nan)
+            f["market_close_away_odds"] = getattr(o, "away_odds_close", np.nan)
+            f["market_close_observed_at"] = (
+                f["market_quote_available_at"] if f["market_quote_verified"] else None)
+            f["observed_total_line"] = getattr(o, "observed_total_line", np.nan)
+            f["close_total_line"] = getattr(o, "close_total_line", np.nan)
+            f["total_juice"] = getattr(o, "total_juice", np.nan)
+            f["ml_quote_tier"] = getattr(o, "ml_quote_tier", None)
         else:
             f["market_quote_verified"] = False
+            f["market_close_home_odds"] = np.nan
+            f["market_close_away_odds"] = np.nan
+            f["market_close_observed_at"] = None
+            f["observed_total_line"] = np.nan
+            f["close_total_line"] = np.nan
+            f["total_juice"] = np.nan
         rows.append(f)
 
         if g.completed and g.home_team_id is not None:
@@ -228,6 +316,8 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
                 if game_date.month == 9:
                     state_sep.record(h, g.home_score, g.away_score, game_date, g.venue_name, g.season)
                     state_sep.record(a, g.away_score, g.home_score, game_date, g.venue_name, g.season)
+            for line in usage_map.get(int(g.game_pk), ()):  # after all decisions
+                workload.record(line["team"], line)
 
     out = pd.DataFrame(rows).set_index("game_pk")
 

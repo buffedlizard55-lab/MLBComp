@@ -18,6 +18,7 @@ ALLOWED_JSON = {
     "summary.json", "leaderboard.json", "strategies.json", "upcoming_bets.json",
     "open_positions.json", "bets_ledger.json", "research_experiments.json",
     "registry.json", "audit_checks.json", "irregularities.json", "kalshi_trades.json",
+    "players.json",
 }
 
 

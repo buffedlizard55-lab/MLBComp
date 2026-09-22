@@ -305,11 +305,12 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         # Migrate databases created by the pre-ledger prototype without
         # destroying them.  New code writes the append-only ledger.
-        _ensure_columns(conn, "bets", {"synthetic_pnl": "REAL", "synthetic": "INTEGER DEFAULT 0", "run_id": "TEXT", "prediction_id": "TEXT", "verification_status": "TEXT"})
+        _ensure_columns(conn, "bets", {"synthetic_pnl": "REAL", "synthetic": "INTEGER DEFAULT 0", "run_id": "TEXT", "prediction_id": "TEXT", "verification_status": "TEXT", "price_tier": "TEXT", "required_price": "REAL", "quote_source_id": "TEXT", "quote_source_url": "TEXT", "quote_source_observation_id": "TEXT", "quote_observed_at": "TEXT", "quote_available_at": "TEXT", "quote_price_american": "REAL"})
         _ensure_columns(conn, "research_findings", {"round_code": "TEXT", "provenance": "TEXT", "status": "TEXT"})
         _ensure_columns(conn, "experiments", {"status": "TEXT DEFAULT 'NOT_RUN'"})
         _ensure_columns(conn, "audit_log", {"log_id": "INTEGER", "entity_type": "TEXT", "entity_id": "TEXT"})
         _ensure_columns(conn, "model_versions", {"parent_version": "TEXT", "feature_cutoff_rule": "TEXT", "training_window": "TEXT", "validation_window": "TEXT", "test_window": "TEXT", "status": "TEXT"})
+        _ensure_columns(conn, "source_metadata", {"notes": "TEXT"})
         conn.commit()
 
 
