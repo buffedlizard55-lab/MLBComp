@@ -279,10 +279,13 @@ def compute_features(games: pd.DataFrame, events: pd.DataFrame,
             f["market_quote_source_url"] = getattr(o, "source_url", None)
             f["market_quote_source_observation_id"] = getattr(o, "source_observation_id", None)
             f["market_quote_closing"] = bool(getattr(o, "closing_flag", False))
+            # Use pd.notna for timestamp presence; bool(np.nan) is True and would leak
             f["market_quote_verified"] = (
                 str(getattr(o, "verification_status", "")) == "VERIFIED"
-                and bool(f["market_quote_observed_at"])
-                and bool(f["market_quote_available_at"])
+                and pd.notna(f["market_quote_observed_at"])
+                and pd.notna(f["market_quote_available_at"])
+                and str(f["market_quote_observed_at"]).strip() != ""
+                and str(f["market_quote_available_at"]).strip() != ""
             )
             # Closing prices (CLV benchmark) and observed totals line.
             f["market_close_home_odds"] = getattr(o, "home_odds_close", np.nan)

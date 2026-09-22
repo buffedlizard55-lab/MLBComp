@@ -491,7 +491,7 @@ def build_pbp_aggregates(pbp: pd.DataFrame, games: pd.DataFrame | None = None) -
 
 
 def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
-    """Join market prices onto games.
+    """Join market prices onto games — union of cesar and bettingtools.
 
     Two layers, never confused:
 
@@ -503,8 +503,13 @@ def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
       quote (available before first pitch by definition), the **closing**
       line is retained for CLV, and both carry observed/availability stamps
       equal to the scheduled first pitch (see ``open_close_odds`` docs).
+
+    The final parquet is the UNION: cesar rows plus any verified bettingtools
+    rows whose game_pk is not already in cesar (e.g. 2015-2018).  Verified
+    rows always win the verification_status.
     """
     g = games.set_index("game_pk")
+    # --- cesar base ---
     o = odds.merge(
         g[["game_date", "home_abbr", "away_abbr", "start_utc"]].rename(
             columns={"game_date": "src_date", "home_abbr": "src_home",
@@ -544,8 +549,10 @@ def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
 
     # Overlay verified open/close rows when the validated file exists.
     oc_path = FEAT / "odds_open_close.parquet"
+    oc_verified_extra = pd.DataFrame()  # verified rows whose game_pk not in cesar
     if oc_path.exists():
         oc = pd.read_parquet(oc_path)
+        # Split: those that join to existing out, and those that don't
         out = out.merge(oc, on="game_pk", how="left", suffixes=("", "_oc"))
         verified_ml = out["ml_verified"].fillna(False).astype(bool)
         verified_ou = out["ou_verified"].fillna(False).astype(bool)
@@ -567,14 +574,13 @@ def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
             f"quote:bettingtools:open:{int(pk)}" for pk in out.loc[verified_ml, "game_pk"]]
         out.loc[verified_ml, "verification_status"] = "VERIFIED"
         out.loc[verified_ml, "ml_quote_tier"] = "verified_open_entry_close_clv"
-        # Totals: observed line for EVAL settlement only (single juice column
-        # is not a two-way quote, so no totals wager is created).
+        # Totals
         out.loc[verified_ou, "observed_total_line"] = out.loc[verified_ou, "open_ou_line"]
         out.loc[verified_ou, "total_juice"] = out.loc[verified_ou, "open_ou_odds"]
         out.loc[verified_ou, "close_total_line"] = out.loc[verified_ou, "close_ou_line"]
         out.loc[verified_ou, "close_total_juice"] = out.loc[verified_ou, "close_ou_odds"]
         out.loc[verified_ou, "ou_line_source"] = "bettingtools_open_close"
-        # Run line (single price pair; treated as closing, not wagered here).
+        # Run line
         out["rl_home_line"] = out.get("home_run_line")
         out["rl_away_line"] = out.get("away_run_line")
         out["rl_home_juice"] = out.get("home_run_line_odds")
@@ -582,7 +588,68 @@ def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
         drop_cols = [c for c in out.columns if c.endswith("_oc")]
         out = out.drop(columns=drop_cols)
 
-    out["closing_flag"] = 0  # entry is the open; close prices live in *_close columns
+        # Now add verified open_close rows whose game_pk was NOT in cesar at all
+        cesar_pks = set(out.game_pk.astype(int).tolist())
+        oc_only = oc[oc.ml_verified & ~oc.game_pk.isin(cesar_pks)].copy()
+        if len(oc_only):
+            # Need game_date/start_utc from games — handle suffix collision explicitly
+            g_reset = games[["game_pk", "game_date", "start_utc"]].copy()
+            g_reset = g_reset.rename(columns={"game_date": "g_game_date", "start_utc": "g_start_utc"})
+            oc_only = oc_only.merge(g_reset, on="game_pk", how="left")
+            extra_rows = []
+            for r in oc_only.itertuples():
+                # Prefer the games table timestamp (canonical), fallback to oc's own start_utc
+                g_start = getattr(r, "g_start_utc", None)
+                oc_start = getattr(r, "start_utc", None)
+                final_start = g_start if pd.notna(g_start) and str(g_start).strip() else oc_start
+                g_date = getattr(r, "g_game_date", None)
+                oc_date = getattr(r, "date", None) if hasattr(r, "date") else None
+                final_date = g_date if pd.notna(g_date) and str(g_date).strip() else oc_date
+                # If still missing, use game_date from oc parquet if present
+                if (final_date is None or (isinstance(final_date, float) and np.isnan(final_date))) and hasattr(r, "game_date"):
+                    final_date = getattr(r, "game_date")
+                extra_rows.append({
+                    "game_pk": int(r.game_pk),
+                    "game_date": final_date,
+                    "start_utc": final_start,
+                    "home_odds": float(r.home_open_ml),
+                    "away_odds": float(r.away_open_ml),
+                    "home_odds_open": float(r.home_open_ml),
+                    "away_odds_open": float(r.away_open_ml),
+                    "home_odds_close": float(r.home_close_ml),
+                    "away_odds_close": float(r.away_close_ml),
+                    "observed_total_line": float(r.open_ou_line) if pd.notna(r.open_ou_line) else np.nan,
+                    "total_juice": float(r.open_ou_odds) if pd.notna(r.open_ou_odds) else np.nan,
+                    "close_total_line": float(r.close_ou_line) if pd.notna(r.close_ou_line) else np.nan,
+                    "close_total_juice": float(r.close_ou_odds) if pd.notna(r.close_ou_odds) else np.nan,
+                    "observed_at": final_start,
+                    "available_at": final_start,
+                    "source_id": "bettingtools_open_close",
+                    "source_url": "https://github.com/pwu97/bettingtools",
+                    "source_observation_id": f"quote:bettingtools:open:{int(r.game_pk)}",
+                    "verification_status": "VERIFIED",
+                    "closing_flag": 0,
+                    "ml_quote_tier": "verified_open_entry_close_clv",
+                    "ou_line_source": "bettingtools_open_close" if pd.notna(r.open_ou_line) else None,
+                    "rl_home_line": float(r.home_run_line) if pd.notna(getattr(r, "home_run_line", np.nan)) else np.nan,
+                    "rl_away_line": float(r.away_run_line) if pd.notna(getattr(r, "away_run_line", np.nan)) else np.nan,
+                    "rl_home_juice": float(r.home_run_line_odds) if pd.notna(getattr(r, "home_run_line_odds", np.nan)) else np.nan,
+                    "rl_away_juice": float(r.away_run_line_odds) if pd.notna(getattr(r, "away_run_line_odds", np.nan)) else np.nan,
+                })
+            oc_verified_extra = pd.DataFrame(extra_rows)
+
+    # Combine base + extra verified
+    if len(oc_verified_extra):
+        # Ensure same columns
+        for col in out.columns:
+            if col not in oc_verified_extra.columns:
+                oc_verified_extra[col] = np.nan
+        for col in oc_verified_extra.columns:
+            if col not in out.columns:
+                out[col] = np.nan
+        out = pd.concat([out, oc_verified_extra[out.columns]], ignore_index=True)
+
+    out["closing_flag"] = 0
     for c in ("home_odds", "away_odds", "home_odds_open", "away_odds_open",
               "home_odds_close", "away_odds_close", "observed_total_line",
               "total_juice", "close_total_line", "close_total_juice"):
@@ -605,7 +672,7 @@ def join_odds(odds: pd.DataFrame, games: pd.DataFrame) -> int:
     out = out[keep].drop_duplicates("game_pk")
     out.to_parquet(FEAT / "odds.parquet", index=False)
     n_verified = int((out.verification_status == "VERIFIED").sum())
-    print(f"[join_odds] rows={len(out)} verified_ml_quotes={n_verified} dropped_mismatch={dropped}")
+    print(f"[join_odds] rows={len(out)} verified_ml_quotes={n_verified} dropped_mismatch={dropped} extra_verified={len(oc_verified_extra)}")
     return len(out), dropped
 
 

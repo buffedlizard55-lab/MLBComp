@@ -242,7 +242,13 @@ def run_backtest(po_valid_pks: set[int] | None = None, min_season: int = 2015,
     observation_ids = verified_observations.observation_id.tolist()
     verified_source_ids = set(verified_observations.source_id.tolist())
     verified_observation_ids = set(verified_observations.observation_id.tolist())
-    source_observations = db.jdump(observation_ids)
+    # Store a content hash and count, not the full 24k-id list per prediction
+    # (which would be ~1MB * 300k predictions = 300GB and cause disk full).
+    source_observations = db.jdump({
+        "verified_observation_count": len(observation_ids),
+        "verified_observation_hash": db.stable_hash(sorted(observation_ids)[:1000]),
+        "note": "Full list in source_observations table; per-prediction field is a hash for provenance"
+    })
     strategies = register_catalog(build_catalog())
     # Only implemented/data-ready strategies enter the run.  Unsupported
     # hypotheses remain in the catalog and are explicitly visible as such.
@@ -425,43 +431,82 @@ def _bet_row(g, strategy: Strategy, decision: dict[str, Any], stake: float,
 def _append_run_outputs(run_id, all_strategies, runnable, bets, predictions,
                         balances, metrics, counts, bankrolls) -> None:
     db.init_db()
-    with db.db() as conn:
+    # Use a direct connection with batched commits to avoid a single huge
+    # transaction that can exhaust temp space and trigger "disk full".
+    import sqlite3
+    from ..config import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    try:
+        cur = conn.cursor()
+        # Strategies
         for strategy in all_strategies:
-            conn.execute(
+            cur.execute(
                 "INSERT OR IGNORE INTO strategies (strategy_id,name,env,model,market,hypothesis,status,created_at,notes) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (strategy.sid, strategy.name, strategy.env, strategy.model, strategy.market,
                  strategy.hypothesis, strategy.status, db.utcnow(), strategy.notes),
             )
+        conn.commit()
+
+        # Predictions - batch 1000 at a time
+        pred_cols = ("prediction_id", "strategy_version_id", "game_pk", "environment", "round_code",
+                     "decision_time", "data_cutoff_time", "selection", "model_probability", "fair_price",
+                     "required_price", "edge", "feature_snapshot_hash", "source_observation_ids",
+                     "availability_status", "result", "created_at")
+        batch = []
         for row in predictions:
-            conn.execute(
+            batch.append(tuple(row[c] for c in pred_cols))
+            if len(batch) >= 1000:
+                cur.executemany(
+                    "INSERT OR IGNORE INTO predictions "
+                    "(prediction_id,strategy_version_id,game_pk,environment,round_code,decision_time,data_cutoff_time,"
+                    "selection,model_probability,fair_price,required_price,edge,feature_snapshot_hash,source_observation_ids,"
+                    "availability_status,result,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    batch,
+                )
+                conn.commit()
+                batch = []
+        if batch:
+            cur.executemany(
                 "INSERT OR IGNORE INTO predictions "
                 "(prediction_id,strategy_version_id,game_pk,environment,round_code,decision_time,data_cutoff_time,"
                 "selection,model_probability,fair_price,required_price,edge,feature_snapshot_hash,source_observation_ids,"
                 "availability_status,result,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                tuple(row[c] for c in ("prediction_id", "strategy_version_id", "game_pk", "environment", "round_code",
-                                      "decision_time", "data_cutoff_time", "selection", "model_probability", "fair_price",
-                                      "required_price", "edge", "feature_snapshot_hash", "source_observation_ids",
-                                      "availability_status", "result", "created_at")),
+                batch,
             )
-        from .ledger import append_backtest_event
-        for row in bets:
-            cur = conn.execute(
-                "INSERT INTO bets (game_pk,strategy_id,env,season,round_code,market,selection,model_prob,fair_price,"
-                "market_price,edge,stake,made_at,status,result,pnl,closing_price,clv,series_state,synthetic_pnl,synthetic,"
-                "run_id,prediction_id,verification_status,price_tier,required_price,quote_source_id,quote_source_url,"
-                "quote_source_observation_id,quote_observed_at,quote_available_at,quote_price_american) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                tuple(row.get(c) for c in ("game_pk", "strategy_id", "env", "season", "round_code", "market", "selection",
-                                      "model_prob", "fair_price", "market_price", "edge", "stake", "made_at", "status",
-                                      "result", "pnl", "closing_price", "clv", "series_state", "synthetic_pnl", "synthetic",
-                                      "run_id", "prediction_id", "verification_status", "price_tier", "required_price",
-                                      "quote_source_id", "quote_source_url", "quote_source_observation_id",
-                                      "quote_observed_at", "quote_available_at", "quote_price_american")),
+            conn.commit()
+
+        # Bets - insert in batches, keep ledger chain in memory
+        # Get current ledger tail hash once
+        cur.execute("SELECT entry_hash FROM immutable_ledger ORDER BY ledger_id DESC LIMIT 1")
+        row = cur.fetchone()
+        prev_hash = row[0] if row else None
+
+        bet_cols = ("game_pk", "strategy_id", "env", "season", "round_code", "market", "selection",
+                    "model_prob", "fair_price", "market_price", "edge", "stake", "made_at", "status",
+                    "result", "pnl", "closing_price", "clv", "series_state", "synthetic_pnl", "synthetic",
+                    "run_id", "prediction_id", "verification_status", "price_tier", "required_price",
+                    "quote_source_id", "quote_source_url", "quote_source_observation_id",
+                    "quote_observed_at", "quote_available_at", "quote_price_american")
+        ledger_inserted = 0
+        for idx, row in enumerate(bets):
+            placeholders = ",".join(["?"] * len(bet_cols))
+            cur.execute(
+                f"INSERT INTO bets (game_pk,strategy_id,env,season,round_code,market,selection,model_prob,fair_price,"
+                f"market_price,edge,stake,made_at,status,result,pnl,closing_price,clv,series_state,synthetic_pnl,synthetic,"
+                f"run_id,prediction_id,verification_status,price_tier,required_price,quote_source_id,quote_source_url,"
+                f"quote_source_observation_id,quote_observed_at,quote_available_at,quote_price_american) "
+                f"VALUES ({placeholders})",
+                tuple(row.get(c) for c in bet_cols),
             )
+            bet_id = int(cur.lastrowid)
             if row["verification_status"] == "VERIFIED_PRICE" and row["status"] in {"OPEN", "SETTLED"}:
-                bet_id = int(cur.lastrowid)
-                append_backtest_event(conn, "BACKTEST_SETTLED" if row["status"] == "SETTLED" else "BACKTEST_OPEN", {
+                # Build ledger event without extra SELECT for previous hash
+                event_type = "BACKTEST_SETTLED" if row["status"] == "SETTLED" else "BACKTEST_OPEN"
+                fields = {
                     "bet_id": bet_id,
                     "strategy_version_id": f"{row['strategy_id']}_v1",
                     "game_pk": row["game_pk"], "environment": row["env"],
@@ -483,29 +528,63 @@ def _append_run_outputs(run_id, all_strategies, runnable, bets, predictions,
                     "roi": (row["pnl"] / row["stake"] if row["pnl"] is not None and row["stake"] else None),
                     "verification_status": "VERIFIED",
                     "payload_json": db.jdump({"run_id": run_id, "prediction_id": row["prediction_id"]}),
-                })
+                }
+                # Manually create ledger row with in-memory chain
+                now = fields.get("event_time") or db.utcnow()
+                fields["event_time"] = now
+                fields["event_type"] = event_type
+                payload = {"event_type": event_type, "event_time": now, **fields, "correction_of": None}
+                entry_hash = db.stable_hash(payload, prev_hash)
+                ledger_cols = [
+                    "bet_id", "event_type", "event_time", "strategy_version_id", "game_pk",
+                    "environment", "round_code", "market", "selection", "source_id",
+                    "source_url", "observed_at", "availability_at", "price_american",
+                    "price_decimal", "implied_probability", "model_probability", "fair_price",
+                    "required_price", "edge", "stake", "bid", "ask", "liquidity", "available_size",
+                    "execution_status", "fill_quantity", "slippage", "closing_price", "result",
+                    "settlement", "pnl", "roi", "verification_status", "correction_of",
+                    "payload_json", "previous_hash", "entry_hash",
+                ]
+                values = [fields.get(c) for c in ledger_cols[:-3]] + [db.jdump(payload), prev_hash, entry_hash]
+                cur.execute(
+                    f"INSERT INTO immutable_ledger ({','.join(ledger_cols)}) VALUES ({','.join('?' for _ in ledger_cols)})",
+                    values,
+                )
+                prev_hash = entry_hash
+                ledger_inserted += 1
+
+            if (idx + 1) % 2000 == 0:
+                conn.commit()
+
+        conn.commit()
+
         for (strategy_id, env), points in metrics.items():
             if not points:
                 continue
             p, y = zip(*points)
             from .evaluation import brier_score, log_loss
-            conn.execute(
+            cur.execute(
                 "INSERT OR REPLACE INTO calibration (strategy_id,env,n_games,brier,log_loss,updated_at) VALUES (?,?,?,?,?,?)",
                 (strategy_id, env, len(points), brier_score(p, y), log_loss(p, y), db.utcnow()),
             )
-        # Bankroll is a derived run snapshot; unlike immutable_ledger it is
-        # never used as the historical source of wager facts.
+        conn.commit()
+        # Bankroll
         seq = 0
         for (strategy_id, env), curve in balances.items():
             peak = STARTING_BANKROLL
             for date, balance in curve:
                 peak = max(peak, balance)
                 dd = (balance - peak) / peak if peak else 0.0
-                conn.execute(
+                cur.execute(
                     "INSERT OR IGNORE INTO bankroll (strategy_id,env,seq,game_date,balance,roi,max_dd) VALUES (?,?,?,?,?,?,?)",
                     (strategy_id, env, seq, date, balance, (balance - STARTING_BANKROLL) / STARTING_BANKROLL, dd),
                 )
                 seq += 1
+                if seq % 2000 == 0:
+                    conn.commit()
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def strategy_stats(run_id: str | None = None) -> pd.DataFrame:

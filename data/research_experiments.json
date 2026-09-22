@@ -37,6 +37,24 @@
     "status": "INCONCLUSIVE",
     "sample_size": 440,
     "findings": {
+      "by_round": {
+        "DS": {
+          "home_win_rate": 0.580110497237569,
+          "n": 181
+        },
+        "LCS": {
+          "home_win_rate": 0.5555555555555556,
+          "n": 126
+        },
+        "WC": {
+          "home_win_rate": 0.5074626865671642,
+          "n": 67
+        },
+        "WS": {
+          "home_win_rate": 0.4090909090909091,
+          "n": 66
+        }
+      },
       "delta": 0.0034927951606725793,
       "post_home_win_rate": 0.5363636363636364,
       "reg_home_win_rate": 0.5328708412029638
@@ -49,10 +67,18 @@
   {
     "id": "Q04",
     "title": "Q04",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "status": "REQUIRES_REPLICATION",
+    "sample_size": 440,
+    "findings": {
+      "delta_batters_faced": -2.5054600927185575,
+      "post_n": 440,
+      "post_starter_bf_mean": 20.177272727272726,
+      "post_starter_bf_std": 5.825513894500433,
+      "reg_n": 27532,
+      "reg_starter_bf_mean": 22.682732819991283,
+      "reg_starter_bf_std": 4.8071737857219325
+    },
+    "conclusion": "Starter leash measured as batters faced by the first pitcher of the game (play-by-play derived) in REG vs POST; descriptive, not causal.",
     "env": "POST",
     "round_code": null,
     "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
@@ -60,10 +86,19 @@
   {
     "id": "Q05",
     "title": "Q05",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "status": "REQUIRES_REPLICATION",
+    "sample_size": 440,
+    "findings": {
+      "delta_bp_share": 0.03224700329958863,
+      "delta_pitchers_used": 1.3900750201418521,
+      "post_bp_bf_share": 0.733288975230417,
+      "post_n": 440,
+      "post_pitchers_used_mean": 9.954545454545455,
+      "reg_bp_bf_share": 0.7010419719308284,
+      "reg_n": 27532,
+      "reg_pitchers_used_mean": 8.564470434403603
+    },
+    "conclusion": "Bullpen usage measured by pitchers used per game and bullpen share of batters faced (play-by-play derived); descriptive, not causal.",
     "env": "POST",
     "round_code": null,
     "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
@@ -105,13 +140,13 @@
     "id": "Q09",
     "title": "Q09",
     "status": "INCONCLUSIVE",
-    "sample_size": 25558,
+    "sample_size": 18948,
     "findings": {
-      "delta": 0.09645432399571058,
-      "elo_brier": 0.25904476709250995,
-      "elo_n": 27532,
-      "lateform_brier": 0.35549909108822053,
-      "lateform_n": 25558
+      "delta": 0.09356168006593857,
+      "elo_brier": 0.25101099308270824,
+      "elo_n": 21501,
+      "lateform_brier": 0.3445726731486468,
+      "lateform_n": 18948
     },
     "conclusion": "Late-season Brier vs Elo baseline; delta measured point-in-time, not a market edge.",
     "env": "REG",
@@ -124,11 +159,11 @@
     "status": "INCONCLUSIVE",
     "sample_size": 440,
     "findings": {
-      "delta": 0.0017857142857142794,
-      "elim_n": 160,
-      "elimination_home_win_rate": 0.5375,
-      "non_elim_home_win_rate": 0.5357142857142857,
-      "non_elim_n": 280
+      "delta": 0.017429193899782147,
+      "elim_n": 170,
+      "elimination_home_win_rate": 0.5470588235294118,
+      "non_elim_home_win_rate": 0.5296296296296297,
+      "non_elim_n": 270
     },
     "conclusion": "Elimination vs non-elimination home win rate (descriptive, not causal; Elo not yet partialled).",
     "env": "POST",
@@ -141,8 +176,8 @@
     "status": "EVALUATED",
     "sample_size": 440,
     "findings": {
-      "clinch_games": 160,
-      "elimination_games": 160,
+      "clinch_games": 170,
+      "elimination_games": 170,
       "post_n": 440
     },
     "conclusion": "Counts of clinching/elimination games; win-rate effects in Q10.",
@@ -153,10 +188,48 @@
   {
     "id": "Q12",
     "title": "Q12",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "status": "EVALUATED",
+    "sample_size": 440,
+    "findings": {
+      "by_game_number": {
+        "1": {
+          "home_win_rate": 0.584070796460177,
+          "mean_margin": 0.5663716814159292,
+          "n": 113
+        },
+        "2": {
+          "home_win_rate": 0.5742574257425742,
+          "mean_margin": 0.3465346534653465,
+          "n": 101
+        },
+        "3": {
+          "home_win_rate": 0.5238095238095238,
+          "mean_margin": -0.38095238095238093,
+          "n": 84
+        },
+        "4": {
+          "home_win_rate": 0.4696969696969697,
+          "mean_margin": -0.8484848484848485,
+          "n": 66
+        },
+        "5": {
+          "home_win_rate": 0.4444444444444444,
+          "mean_margin": -0.6666666666666666,
+          "n": 45
+        },
+        "6": {
+          "home_win_rate": 0.65,
+          "mean_margin": 0.5,
+          "n": 20
+        },
+        "7": {
+          "home_win_rate": 0.36363636363636365,
+          "mean_margin": -1.3636363636363635,
+          "n": 11
+        }
+      }
+    },
+    "conclusion": "Home win rate and mean margin by series game number (descriptive; home-field pattern confounds raw rates).",
     "env": "POST",
     "round_code": null,
     "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
@@ -167,9 +240,9 @@
     "status": "INCONCLUSIVE",
     "sample_size": 440,
     "findings": {
-      "delta": -0.1361748089066135,
-      "home_loss_rest_diff_mean": 0.09803921568627451,
-      "home_win_rest_diff_mean": -0.038135593220338986
+      "delta": -0.15112994350282485,
+      "home_loss_rest_diff_mean": 0.08333333333333333,
+      "home_win_rest_diff_mean": -0.06779661016949153
     },
     "conclusion": "Rest difference vs home win (descriptive).",
     "env": "POST",
@@ -179,11 +252,28 @@
   {
     "id": "Q14",
     "title": "Q14",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
-    "env": "POST",
+    "status": "EVALUATED",
+    "sample_size": 12084,
+    "findings": {
+      "brier_close": 0.23915700582063076,
+      "by_env": {
+        "POST": {
+          "brier_close": 0.23697102301194814,
+          "mean_abs_move": 0.02523960820652527,
+          "n": 178
+        },
+        "REG": {
+          "brier_close": 0.23918968723671888,
+          "mean_abs_move": 0.025421844473776985,
+          "n": 11906
+        }
+      },
+      "fav_at_close_win_rate": 0.5856504468718967,
+      "mean_abs_move": 0.02541916009314385,
+      "n": 12084
+    },
+    "conclusion": "Verified open/close rows only: movement size, closing-line favorite hit rate and closing de-vigged Brier by environment. This measures market efficiency, not a strategy's edge.",
+    "env": "ALL",
     "round_code": null,
     "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
@@ -234,10 +324,10 @@
   {
     "id": "Q19",
     "title": "Q19",
-    "status": "DATA_UNAVAILABLE",
-    "sample_size": 0,
+    "status": "EVALUATED",
+    "sample_size": 48336,
     "findings": {
-      "verified_quote_rows": 0
+      "verified_quote_rows": 48336
     },
     "conclusion": "Historical market coverage is counted from verified quote records only.",
     "env": "ALL",
@@ -259,21 +349,21 @@
     "id": "EXP_A",
     "title": "Model A \u2014 regular-season transfer",
     "status": "EVALUATED",
-    "sample_size": 440,
+    "sample_size": 362,
     "findings": {
-      "brier": 0.24936072954902402,
-      "log_loss": 0.69211412752737,
-      "n": 440,
+      "brier": 0.25212424697419006,
+      "log_loss": 0.697871809244537,
+      "n": 362,
       "status": "EVALUATED",
       "strategy_id": "MLB_POST_XREG_001",
-      "verified_n": 0,
-      "verified_pnl": null,
-      "verified_roi": null,
-      "win_rate": 0.5477272727272727
+      "verified_n": 100,
+      "verified_pnl": -637.6581486210146,
+      "verified_roi": -0.02035443195600238,
+      "win_rate": 0.5386740331491713
     },
-    "brier": 0.24936072954902402,
-    "log_loss": 0.69211412752737,
-    "roi": null,
+    "brier": 0.25212424697419006,
+    "log_loss": 0.697871809244537,
+    "roi": -0.02035443195600238,
     "env": "POST",
     "round_code": null,
     "conclusion": "Comparison is not a superiority claim; preserve all models.",
@@ -283,21 +373,21 @@
     "id": "EXP_B",
     "title": "Model B \u2014 regular season plus postseason adjustment",
     "status": "EVALUATED",
-    "sample_size": 440,
+    "sample_size": 362,
     "findings": {
-      "brier": 0.25492997383294524,
-      "log_loss": 0.7033925586498165,
-      "n": 440,
+      "brier": 0.2582105457894204,
+      "log_loss": 0.7101552157899218,
+      "n": 362,
       "status": "EVALUATED",
       "strategy_id": "MLB_POST_ADJUSTED_001",
-      "verified_n": 0,
-      "verified_pnl": null,
-      "verified_roi": null,
-      "win_rate": 0.5022727272727273
+      "verified_n": 100,
+      "verified_pnl": -5833.617050889054,
+      "verified_roi": -0.23072904528657542,
+      "win_rate": 0.49171270718232046
     },
-    "brier": 0.25492997383294524,
-    "log_loss": 0.7033925586498165,
-    "roi": null,
+    "brier": 0.2582105457894204,
+    "log_loss": 0.7101552157899218,
+    "roi": -0.23072904528657542,
     "env": "POST",
     "round_code": null,
     "conclusion": "Comparison is not a superiority claim; preserve all models.",
@@ -307,21 +397,21 @@
     "id": "EXP_C",
     "title": "Model C \u2014 dedicated postseason/series state",
     "status": "EVALUATED",
-    "sample_size": 128,
+    "sample_size": 122,
     "findings": {
-      "brier": 0.25740655164186155,
-      "log_loss": 0.7161662328414714,
-      "n": 128,
+      "brier": 0.25883389819662483,
+      "log_loss": 0.71949461204553,
+      "n": 122,
       "status": "EVALUATED",
       "strategy_id": "MLB_POST_SERIESSTATE_001",
-      "verified_n": 0,
-      "verified_pnl": null,
-      "verified_roi": null,
-      "win_rate": 0.5390625
+      "verified_n": 38,
+      "verified_pnl": 572.1891160572599,
+      "verified_roi": 0.029926803778383665,
+      "win_rate": 0.5409836065573771
     },
-    "brier": 0.25740655164186155,
-    "log_loss": 0.7161662328414714,
-    "roi": null,
+    "brier": 0.25883389819662483,
+    "log_loss": 0.71949461204553,
+    "roi": 0.029926803778383665,
     "env": "POST",
     "round_code": null,
     "conclusion": "Comparison is not a superiority claim; preserve all models.",
@@ -331,11 +421,11 @@
     "id": "EXP_D",
     "title": "Model D \u2014 round-specific models",
     "status": "EVALUATED",
-    "sample_size": 440,
+    "sample_size": 362,
     "findings": {
-      "brier": 0.25492997383294524,
-      "log_loss": 0.7033925586498165,
-      "n": 440,
+      "brier": 0.2582105457894204,
+      "log_loss": 0.7101552157899218,
+      "n": 362,
       "status": "EVALUATED",
       "strategy_ids": [
         "MLB_POST_WC_ELO_001",
@@ -343,14 +433,14 @@
         "MLB_POST_LCS_ELO_001",
         "MLB_POST_WS_ELO_001"
       ],
-      "verified_n": 0,
-      "verified_pnl": null,
-      "verified_roi": null,
-      "win_rate": 0.5022727272727273
+      "verified_n": 100,
+      "verified_pnl": -7746.5455941032715,
+      "verified_roi": -0.23568662379729555,
+      "win_rate": 0.49171270718232046
     },
-    "brier": 0.25492997383294524,
-    "log_loss": 0.7033925586498165,
-    "roi": null,
+    "brier": 0.2582105457894204,
+    "log_loss": 0.7101552157899218,
+    "roi": -0.23568662379729555,
     "env": "POST",
     "round_code": null,
     "conclusion": "Comparison is not a superiority claim; preserve all models.",
@@ -360,21 +450,21 @@
     "id": "EXP_E",
     "title": "Model E \u2014 hierarchical partial pooling",
     "status": "EVALUATED",
-    "sample_size": 440,
+    "sample_size": 385,
     "findings": {
-      "brier": 0.25643123525484146,
-      "log_loss": 0.7102830262620053,
-      "n": 440,
+      "brier": 0.25941592611021336,
+      "log_loss": 0.7169949894817209,
+      "n": 385,
       "status": "EVALUATED",
       "strategy_id": "MLB_POST_HIERARCHICAL_001",
-      "verified_n": 0,
-      "verified_pnl": null,
-      "verified_roi": null,
-      "win_rate": 0.5431818181818182
+      "verified_n": 123,
+      "verified_pnl": 2488.5987854218456,
+      "verified_roi": 0.04022183900850913,
+      "win_rate": 0.5376623376623376
     },
-    "brier": 0.25643123525484146,
-    "log_loss": 0.7102830262620053,
-    "roi": null,
+    "brier": 0.25941592611021336,
+    "log_loss": 0.7169949894817209,
+    "roi": 0.04022183900850913,
     "env": "POST",
     "round_code": null,
     "conclusion": "Comparison is not a superiority claim; preserve all models.",

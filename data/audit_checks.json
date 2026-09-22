@@ -1,5 +1,11 @@
 [
   {
+    "name": "clv_in_range",
+    "category": "markets",
+    "passed": true,
+    "details": "clv values outside [-1,1]=0"
+  },
+  {
     "name": "game_pk_unique",
     "category": "games",
     "passed": true,
@@ -9,7 +15,7 @@
     "name": "issue_queue_available",
     "category": "data_quality",
     "passed": true,
-    "details": "data_issues table present; open/recorded issues=0"
+    "details": "data_issues table present; open/recorded issues=5"
   },
   {
     "name": "ledger_append_only_triggers",
@@ -21,7 +27,7 @@
     "name": "ledger_hash_chain",
     "category": "immutable_ledger",
     "passed": true,
-    "details": "ledger rows=0, invalid hashes=[]"
+    "details": "ledger rows=33143, invalid hashes=[]"
   },
   {
     "name": "no_live_execution_connector",
@@ -51,7 +57,7 @@
     "name": "prediction_cutoff_present",
     "category": "predictions",
     "passed": true,
-    "details": "predictions=144098, missing data_cutoff_time=0"
+    "details": "predictions=221538, missing data_cutoff_time=0"
   },
   {
     "name": "quote_availability_gate",
@@ -60,10 +66,16 @@
     "details": "verified quotes without observed_at=0"
   },
   {
+    "name": "quote_observations_verified",
+    "category": "markets",
+    "passed": true,
+    "details": "verified quotes missing a VERIFIED source observation=0"
+  },
+  {
     "name": "quote_price_integrity",
     "category": "markets",
     "passed": true,
-    "details": "quote rows=0, invalid American prices=0; missing prices are not quote rows"
+    "details": "quote rows=48336, invalid American prices=0; missing prices are not quote rows"
   },
   {
     "name": "schema_required_tables",
@@ -78,28 +90,40 @@
     "details": "completed rows=27972, invalid/non-negative score failures=0"
   },
   {
+    "name": "series_needed_format",
+    "category": "postseason",
+    "passed": true,
+    "details": "series rows with wrong wins-needed=0 (shared round_required rules; WC is single-game 2012-2019/2021, best-of-3 in 2020 and 2022+)"
+  },
+  {
     "name": "series_state_pre_game",
     "category": "series_state",
     "passed": true,
     "details": "state rows=440, invalid pre-game counters=0"
   },
   {
+    "name": "settlement_matches_scores",
+    "category": "settlements",
+    "passed": true,
+    "details": "scored ML rows re-derived from games: checked=128814, mismatches=0"
+  },
+  {
     "name": "source_registry_fields",
     "category": "sources",
     "passed": true,
-    "details": "registry rows=15, required metadata columns=['access_method', 'automation_capability', 'cost', 'current_availability', 'data_type', 'granularity', 'historical_depth', 'licensing', 'limitations', 'name', 'reliability', 'restrictions', 'url', 'verification_date', 'verification_status']; verification_date may be null only for NOT_VERIFIED discovery records"
+    "details": "registry rows=16, required metadata columns=['access_method', 'automation_capability', 'cost', 'current_availability', 'data_type', 'granularity', 'historical_depth', 'licensing', 'limitations', 'name', 'reliability', 'restrictions', 'url', 'verification_date', 'verification_status']; verification_date may be null only for NOT_VERIFIED discovery records"
   },
   {
     "name": "strategy_environment_isolation",
     "category": "strategies",
     "passed": true,
-    "details": "strategy rows=68; invalid environments=[]"
+    "details": "strategy rows=69; invalid environments=[]"
   },
   {
     "name": "strategy_versions_present",
     "category": "strategies",
     "passed": true,
-    "details": "strategies=68, version rows=68; every persisted strategy has a version"
+    "details": "strategies=69, version rows=69; every persisted strategy has a version"
   },
   {
     "name": "winner_integrity",

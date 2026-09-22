@@ -242,12 +242,13 @@
   },
   {
     "sid": "MLB_REG_BULLPEN_001",
-    "name": "Bullpen availability",
+    "name": "Bullpen workload",
     "env": "REG",
-    "model": "elo",
+    "model": "bullpen",
     "market": "ML",
-    "hypothesis": "Reliever workload and high-leverage availability improve full-game forecasts.",
+    "hypothesis": "Point-in-time bullpen workload (batters faced over the last three team games, play-by-play derived) adjusts the team-strength baseline; the coefficient is learned online from strictly earlier games.",
     "data_requirements": [
+      "games.scores",
       "bullpen_usage"
     ],
     "entry_rule": "Only evaluate when every required input is available before the decision timestamp.",
@@ -260,7 +261,7 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
+    "status": "BACKTESTED",
     "extra": {},
     "id": "MLB_REG_BULLPEN_001",
     "strategy_id": "MLB_REG_BULLPEN_001",
@@ -272,9 +273,10 @@
     "env": "REG",
     "model": "elo",
     "market": "ML",
-    "hypothesis": "Back-to-back and recent pitch workload affect late-game win probability.",
+    "hypothesis": "Back-to-back usage plus official pitch counts affect late-game win probability.",
     "data_requirements": [
-      "bullpen_usage"
+      "bullpen_usage",
+      "statistics.pitch_counts"
     ],
     "entry_rule": "Only evaluate when every required input is available before the decision timestamp.",
     "required_price_rule": "Require an observed, timestamped quote at or before the decision timestamp; otherwise EVAL/PROPOSED, never a wager.",
@@ -290,6 +292,33 @@
     "extra": {},
     "id": "MLB_REG_BULLPEN_FATIGUE_001",
     "strategy_id": "MLB_REG_BULLPEN_FATIGUE_001",
+    "env_label": "REG"
+  },
+  {
+    "sid": "MLB_REG_REST_001",
+    "name": "Rest differential",
+    "env": "REG",
+    "model": "rest",
+    "market": "ML",
+    "hypothesis": "Days since each team's last completed game adjust the baseline; the coefficient is learned online from strictly earlier games.",
+    "data_requirements": [
+      "games.scores",
+      "schedule"
+    ],
+    "entry_rule": "Only evaluate when every required input is available before the decision timestamp.",
+    "required_price_rule": "Require an observed, timestamped quote at or before the decision timestamp; otherwise EVAL/PROPOSED, never a wager.",
+    "sizing_rule": "Quarter Kelly on the observed price, capped at 5% of strategy bankroll; no stake without a price.",
+    "settlement_rule": "Use the market's documented settlement rule and an independently observed result; W/L/P/V only.",
+    "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
+    "limitations": "No causal claim; small samples remain inconclusive.",
+    "min_edge": 0.02,
+    "notes": "",
+    "version": "v1",
+    "parent_version": null,
+    "status": "BACKTESTED",
+    "extra": {},
+    "id": "MLB_REG_REST_001",
+    "strategy_id": "MLB_REG_REST_001",
     "env_label": "REG"
   },
   {
@@ -535,12 +564,12 @@
     "env_label": "REG"
   },
   {
-    "sid": "MLB_REG_REST_001",
-    "name": "Rest and travel",
+    "sid": "MLB_REG_TRAVEL_001",
+    "name": "Travel distance",
     "env": "REG",
     "model": "elo",
     "market": "ML",
-    "hypothesis": "Rest, distance and time-zone changes affect team performance.",
+    "hypothesis": "Distance and time-zone changes beyond rest days affect team performance.",
     "data_requirements": [
       "travel_rest",
       "schedule"
@@ -557,8 +586,8 @@
     "parent_version": null,
     "status": "DATA_UNAVAILABLE",
     "extra": {},
-    "id": "MLB_REG_REST_001",
-    "strategy_id": "MLB_REG_REST_001",
+    "id": "MLB_REG_TRAVEL_001",
+    "strategy_id": "MLB_REG_TRAVEL_001",
     "env_label": "REG"
   },
   {
@@ -589,11 +618,11 @@
   },
   {
     "sid": "MLB_REG_MARKET_MOVE_001",
-    "name": "Opening-to-current movement",
+    "name": "Opening-to-close movement",
     "env": "REG",
-    "model": "market",
+    "model": "market_move",
     "market": "ML",
-    "hypothesis": "Observed market movement contains information when timestamps and liquidity exist.",
+    "hypothesis": "Movement from the verified opening line to the close (both known at first pitch) adds information beyond the closing price itself; entry is at the close and the movement coefficient is learned online.",
     "data_requirements": [
       "markets.moneyline.open_current"
     ],
@@ -607,8 +636,10 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
-    "extra": {},
+    "status": "NOT_RUN",
+    "extra": {
+      "price_tier": "close"
+    },
     "id": "MLB_REG_MARKET_MOVE_001",
     "strategy_id": "MLB_REG_MARKET_MOVE_001",
     "env_label": "REG"
@@ -619,7 +650,7 @@
     "env": "REG",
     "model": "market",
     "market": "ML",
-    "hypothesis": "Closing prices are a benchmark, not a look-ahead feature at entry.",
+    "hypothesis": "The de-vigged closing favorite is the market-efficiency benchmark: calibration against it measures book hold, not a model edge. Entry is at the closing price on verified rows only.",
     "data_requirements": [
       "markets.moneyline.close"
     ],
@@ -629,12 +660,14 @@
     "settlement_rule": "Use the market's documented settlement rule and an independently observed result; W/L/P/V only.",
     "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
     "limitations": "No causal claim; small samples remain inconclusive.",
-    "min_edge": 0.02,
+    "min_edge": 0.0,
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
-    "extra": {},
+    "status": "BACKTESTED",
+    "extra": {
+      "price_tier": "close"
+    },
     "id": "MLB_REG_CLOSING_001",
     "strategy_id": "MLB_REG_CLOSING_001",
     "env_label": "REG"
@@ -1155,13 +1188,14 @@
   },
   {
     "sid": "MLB_POST_BULLPEN_001",
-    "name": "Postseason bullpen availability",
+    "name": "Postseason bullpen workload",
     "env": "POST",
-    "model": "hierarchical",
+    "model": "bullpen",
     "market": "ML",
-    "hypothesis": "High-leverage reliever availability and workload are modeled separately by round.",
+    "hypothesis": "Postseason bullpen workload (play-by-play derived, point-in-time) uses its own online coefficient so the small postseason sample cannot borrow the regular-season fit silently.",
     "data_requirements": [
-      "postseason.bullpen"
+      "postseason.games",
+      "bullpen_usage"
     ],
     "entry_rule": "Only evaluate when every required input is available before the decision timestamp.",
     "required_price_rule": "Require an observed, timestamped quote at or before the decision timestamp; otherwise EVAL/PROPOSED, never a wager.",
@@ -1173,7 +1207,7 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
+    "status": "BACKTESTED",
     "extra": {},
     "id": "MLB_POST_BULLPEN_001",
     "strategy_id": "MLB_POST_BULLPEN_001",
@@ -1237,7 +1271,7 @@
     "env": "POST",
     "model": "market",
     "market": "ML",
-    "hypothesis": "Postseason price movement is compared with regular-season market behavior only when observed.",
+    "hypothesis": "The de-vigged verified postseason price is compared with model probability only where an open/close quote exists; postseason market efficiency is measured against postseason rows, never inferred from regular-season prices.",
     "data_requirements": [
       "postseason.markets"
     ],
@@ -1251,7 +1285,7 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "extra": {},
     "id": "MLB_POST_MARKET_001",
     "strategy_id": "MLB_POST_MARKET_001",
@@ -1344,7 +1378,7 @@
     "env": "WC",
     "model": "market",
     "market": "ML",
-    "hypothesis": "Wild Card market efficiency is measured from observed prices, never inferred from outcomes.",
+    "hypothesis": "Wild Card market efficiency is measured from observed verified prices, never inferred from outcomes.",
     "data_requirements": [
       "postseason.markets"
     ],
@@ -1358,7 +1392,7 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "extra": {},
     "id": "MLB_POST_WC_MARKET_001",
     "strategy_id": "MLB_POST_WC_MARKET_001",
@@ -1451,7 +1485,7 @@
     "env": "DS",
     "model": "market",
     "market": "ML",
-    "hypothesis": "Division Series market efficiency is measured from observed prices, never inferred from outcomes.",
+    "hypothesis": "Division Series market efficiency is measured from observed verified prices, never inferred from outcomes.",
     "data_requirements": [
       "postseason.markets"
     ],
@@ -1465,7 +1499,7 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "extra": {},
     "id": "MLB_POST_DS_MARKET_001",
     "strategy_id": "MLB_POST_DS_MARKET_001",
@@ -1558,7 +1592,7 @@
     "env": "LCS",
     "model": "market",
     "market": "ML",
-    "hypothesis": "League Championship Series market efficiency is measured from observed prices, never inferred from outcomes.",
+    "hypothesis": "League Championship Series market efficiency is measured from observed verified prices, never inferred from outcomes.",
     "data_requirements": [
       "postseason.markets"
     ],
@@ -1572,7 +1606,7 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "extra": {},
     "id": "MLB_POST_LCS_MARKET_001",
     "strategy_id": "MLB_POST_LCS_MARKET_001",
@@ -1665,7 +1699,7 @@
     "env": "WS",
     "model": "market",
     "market": "ML",
-    "hypothesis": "World Series market efficiency is measured from observed prices, never inferred from outcomes.",
+    "hypothesis": "World Series market efficiency is measured from observed verified prices, never inferred from outcomes.",
     "data_requirements": [
       "postseason.markets"
     ],
@@ -1679,7 +1713,7 @@
     "notes": "",
     "version": "v1",
     "parent_version": null,
-    "status": "DATA_UNAVAILABLE",
+    "status": "NOT_RUN",
     "extra": {},
     "id": "MLB_POST_WS_MARKET_001",
     "strategy_id": "MLB_POST_WS_MARKET_001",
