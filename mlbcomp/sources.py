@@ -115,6 +115,20 @@ SOURCE_CATALOG: tuple[Source, ...] = (
            "papers and methods", "paper dependent", "NOT_CHECKED", "web search", "public search; paper access varies",
            "publisher access and license", "publisher/license terms", "research discovery", "paper", "low", "NOT_VERIFIED",
            "Use for hypotheses and methods, not as an unverified data feed."),
+    Source("chadwick_register", "Chadwick Bureau people register", "https://github.com/chadwickbureau/register",
+           "person identifiers linking Retrosheet/MLB/Baseball-Reference IDs",
+           "multi-decade register", "AVAILABLE", "GitHub git/CSV",
+           "free public repository", "repository license; identifier coverage gaps",
+           "repository license applies", "identity-resolution candidate", "person",
+           "high", "NOT_VERIFIED",
+           "Reachable on GitHub 2026-09-22. Useful for joins; not a game-result or odds source."),
+    Source("chadwick_retrosheet", "Chadwick Retrosheet mirror", "https://github.com/chadwickbureau/retrosheet",
+           "enhanced Retrosheet event/game files", "Retrosheet historical depth",
+           "AVAILABLE", "GitHub git", "free public repository",
+           "Retrosheet terms plus repository license; not a live pre-game feed",
+           "Retrosheet terms / repository license", "historical secondary mirror",
+           "game/event", "high", "NOT_VERIFIED",
+           "GitHub repo reachable 2026-09-22. Cross-check candidate for scores; not used for prices."),
 )
 
 

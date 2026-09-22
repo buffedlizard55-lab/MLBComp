@@ -38,5 +38,45 @@
     "status": "OPEN",
     "description": "Open/close validation/refresh failed: ModuleNotFoundError: No module named 'pyreadr'",
     "resolution": null
+  },
+  {
+    "id": "ISSUE-POST-ALIAS-DOUBLECOUNT",
+    "title": "REPORTING",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "description": "MLB_POST_MODEL_A\u2013E are experiment aliases of catalog strategies. Including them in POST environment totals double-counted verified bets (1031 vs 485 unique) and PnL (\u221214352.65 vs \u22127024.96). unique_environment_breakdown excludes the aliases. Raw environment_breakdown is retained for audit.",
+    "resolution": "Dashboard unique totals added 2026-09-22; aliases remain visible on the leaderboard."
+  },
+  {
+    "id": "ISSUE-MODEL-C-BINDING",
+    "title": "MODEL_VERSION",
+    "severity": "MEDIUM",
+    "status": "OPEN",
+    "description": "In this SOURCE_SNAPSHOT, catalog row MLB_POST_MODEL_C_001 was bound to hierarchical (same numbers as MLB_POST_HIERARCHICAL_001 / MODEL_E) while experiment EXP_C evaluated MLB_POST_SERIESSTATE_001. MODEL_C is remapped to post_elo for future runs. Published MODEL_C metrics are not rewritten.",
+    "resolution": null
+  },
+  {
+    "id": "ISSUE-ANALYTICS-DETAIL-MISSING",
+    "title": "UI",
+    "severity": "HIGH",
+    "status": "RESOLVED",
+    "description": "app.js renderAnalytics wrote #analytics-detail, which was absent from index.html and threw on the Analytics tab, blocking Research/Sources/Verification renders that follow it in renderAll.",
+    "resolution": "Element added and renderers made null-safe on 2026-09-22."
+  },
+  {
+    "id": "ISSUE-EXPORT-WIPE-GUARD",
+    "title": "PIPELINE",
+    "severity": "HIGH",
+    "status": "RESOLVED",
+    "description": "mlbcomp.web.export_static would overwrite a committed SOURCE_SNAPSHOT with NO_SOURCE_SNAPSHOT whenever data/features/games.parquet was absent.",
+    "resolution": "export() now refuses that overwrite unless --force is passed."
+  },
+  {
+    "id": "ISSUE-SSL-EGRESS-2026-09-22",
+    "title": "SOURCE",
+    "severity": "MEDIUM",
+    "status": "OPEN",
+    "description": "Re-checked 2026-09-22: statsapi.mlb.com, retrosheet.org, baseballsavant.mlb.com, api.weather.gov, trading-api.kalshi.com and api.elections.kalshi.com fail with TLS/SSL connection closed. GitHub HTML/API remain reachable. chadwickbureau/register and chadwickbureau/retrosheet added as NOT_VERIFIED discovery records.",
+    "resolution": null
   }
 ]

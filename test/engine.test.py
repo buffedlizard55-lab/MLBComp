@@ -11,6 +11,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import math
+
 from mlbcomp import db
 from mlbcomp.config import american_to_decimal, am_to_prob, devig_two, prob_to_am
 from mlbcomp.engine.ledger import ObservedQuote, Prediction, record_prediction, record_wager, settle_wager, verify_chain, kelly_stake
@@ -131,6 +133,49 @@ class TestMLBCompEngine(unittest.TestCase):
         for round_code in ('WC', 'DS', 'LCS', 'WS'):
             self.assertTrue(any(s.env == round_code for s in catalog))
         self.assertTrue(any('hierarchical' in s.model for s in catalog if s.env == 'POST'))
+        self.assertTrue(any(s.sid == 'MLB_POST_DEDICATED_001' and s.model == 'post_elo' for s in catalog))
+        self.assertTrue(any(s.sid == 'MLB_POST_MODEL_C_001' and s.model == 'post_elo' for s in catalog))
+        self.assertTrue(any((s.extra or {}).get('alias_of') == 'MLB_POST_XREG_001' for s in catalog))
+
+    def test_dedicated_postseason_elo_uses_post_prior(self):
+        from mlbcomp.engine.strategies import model_post_elo, model_xreg
+        class Game: pass
+        self.assertTrue(math.isnan(model_post_elo(Game(), {}, {})))
+        self.assertAlmostEqual(model_post_elo(Game(), {'p_post_elo': 0.61, 'p_elo': 0.4}, {}), 0.61)
+        self.assertAlmostEqual(model_xreg(Game(), {'p_elo': 0.4, 'p_post_elo': 0.61}, {}), 0.4)
+
+    def test_chronological_split_does_not_mix_future_timestamps(self):
+        from mlbcomp.engine.evaluation import chronological_split
+        frame = __import__('pandas').DataFrame([
+            {'decision_time': '2024-04-01', 'game_pk': 1, 'y': 0},
+            {'decision_time': '2024-04-01', 'game_pk': 2, 'y': 1},
+            {'decision_time': '2024-06-01', 'game_pk': 3, 'y': 1},
+            {'decision_time': '2024-08-01', 'game_pk': 4, 'y': 0},
+            {'decision_time': '2024-09-01', 'game_pk': 5, 'y': 1},
+        ])
+        split = chronological_split(frame)
+        self.assertGreater(len(split.train), 0)
+        self.assertGreater(len(split.test), 0)
+        self.assertLessEqual(split.train.decision_time.max(), split.validate.decision_time.min() if len(split.validate) else split.test.decision_time.min())
+        if len(split.validate):
+            self.assertLessEqual(split.validate.decision_time.max(), split.test.decision_time.min())
+        # Same-timestamp games stay in one partition.
+        self.assertEqual(set(split.train[split.train.decision_time == '2024-04-01'].game_pk), {1, 2})
+
+    def test_export_refuses_to_wipe_source_snapshot(self):
+        from mlbcomp.web import export_static
+        tmp = Path(self.tmp.name) / 'export'
+        tmp.mkdir()
+        old_data, old_feat = export_static.DATA, export_static.FEAT
+        export_static.DATA = tmp
+        export_static.FEAT = tmp / 'features'
+        try:
+            (tmp / 'summary.json').write_text(json.dumps({'data_mode': 'SOURCE_SNAPSHOT', 'total_strategies': 70}))
+            with self.assertRaises(RuntimeError):
+                export_static.export()
+            self.assertEqual(json.loads((tmp / 'summary.json').read_text())['data_mode'], 'SOURCE_SNAPSHOT')
+        finally:
+            export_static.DATA, export_static.FEAT = old_data, old_feat
 
     def test_missing_quote_cannot_create_wager(self):
         p = Prediction('p', 'strategy_v1', 10, 'REG', None, '2026-09-21T12:00:00Z',

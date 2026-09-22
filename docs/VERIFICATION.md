@@ -40,8 +40,14 @@ it is not filled from a guess.
 
 ## Current checkout
 
-The committed static snapshot is intentionally `NO_SOURCE_SNAPSHOT` until the
-fetcher and validators are run. It therefore contains no historical wager or
-performance claim. Registry rows are discovery records with
-`NOT_VERIFIED` status. This is safer than presenting a plausible but
-unreproducible scorecard.
+The committed static snapshot is `SOURCE_SNAPSHOT` (as-of 2026-09-21) with 22
+passing controls in `data/audit_checks.json`. The 2026-09-22 audit added:
+
+- an export wipe guard (`--force` required to replace SOURCE_SNAPSHOT without parquet);
+- unique POST totals that exclude `MLB_POST_MODEL_A`–`E` aliases;
+- Q15–Q18 wired to Models A–E (INCONCLUSIVE; no model promoted);
+- `#analytics-detail` so the Analytics tab no longer throws.
+
+Registry rows remain a mix of PARTIALLY_VERIFIED production sources and
+NOT_VERIFIED discovery records. A passing control is not a claim that every
+source is available.

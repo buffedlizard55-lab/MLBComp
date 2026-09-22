@@ -1,7 +1,7 @@
 [
   {
     "id": "Q01",
-    "title": "Q01",
+    "title": "Does postseason scoring differ from regular-season scoring?",
     "status": "REQUIRES_REPLICATION",
     "sample_size": 440,
     "findings": {
@@ -18,7 +18,7 @@
   },
   {
     "id": "Q02",
-    "title": "Q02",
+    "title": "Does postseason run-margin volatility differ from regular season?",
     "status": "REQUIRES_REPLICATION",
     "sample_size": 440,
     "findings": {
@@ -33,7 +33,7 @@
   },
   {
     "id": "Q03",
-    "title": "Q03",
+    "title": "Does home advantage differ by environment or round?",
     "status": "INCONCLUSIVE",
     "sample_size": 440,
     "findings": {
@@ -66,7 +66,7 @@
   },
   {
     "id": "Q04",
-    "title": "Q04",
+    "title": "Does starting-pitcher usage or leash change in postseason?",
     "status": "REQUIRES_REPLICATION",
     "sample_size": 440,
     "findings": {
@@ -85,7 +85,7 @@
   },
   {
     "id": "Q05",
-    "title": "Q05",
+    "title": "Does bullpen workload or availability change in postseason?",
     "status": "REQUIRES_REPLICATION",
     "sample_size": 440,
     "findings": {
@@ -105,40 +105,40 @@
   },
   {
     "id": "Q06",
-    "title": "Q06",
-    "status": "NOT_RUN",
+    "title": "Does lineup construction or platoon usage change in postseason?",
+    "status": "DATA_UNAVAILABLE",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "conclusion": "Lineup construction and platoon usage require confirmed batting-order rows with announced_at/available_at. No such source is verified in this checkout; the question is flagged rather than inferred from box scores.",
     "env": "POST",
     "round_code": null,
     "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q07",
-    "title": "Q07",
-    "status": "NOT_RUN",
+    "title": "Do managerial substitutions or defensive changes change in postseason?",
+    "status": "DATA_UNAVAILABLE",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "conclusion": "Managerial substitutions, pinch hitting and defensive changes require timestamped play-by-play roles plus a pre-game availability gate. Those fields are not verified here.",
     "env": "POST",
     "round_code": null,
     "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q08",
-    "title": "Q08",
-    "status": "NOT_RUN",
+    "title": "Does pitch mix or velocity retain a postseason-specific effect?",
+    "status": "DATA_UNAVAILABLE",
     "sample_size": 0,
     "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "conclusion": "Pitch mix and velocity require pitch-level Statcast with an availability time at or before first pitch. Baseball Savant is not reachable from this environment and is not a production dependency.",
     "env": "POST",
     "round_code": null,
     "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
   },
   {
     "id": "Q09",
-    "title": "Q09",
+    "title": "Does late-season form add information beyond multi-year and season priors?",
     "status": "INCONCLUSIVE",
     "sample_size": 18948,
     "findings": {
@@ -155,7 +155,7 @@
   },
   {
     "id": "Q10",
-    "title": "Q10",
+    "title": "Does series state affect game outcomes after controlling for team strength?",
     "status": "INCONCLUSIVE",
     "sample_size": 440,
     "findings": {
@@ -172,7 +172,7 @@
   },
   {
     "id": "Q11",
-    "title": "Q11",
+    "title": "Are elimination and clinching games measurably different?",
     "status": "EVALUATED",
     "sample_size": 440,
     "findings": {
@@ -187,7 +187,7 @@
   },
   {
     "id": "Q12",
-    "title": "Q12",
+    "title": "Does game number or home-field pattern matter within a series?",
     "status": "EVALUATED",
     "sample_size": 440,
     "findings": {
@@ -236,7 +236,7 @@
   },
   {
     "id": "Q13",
-    "title": "Q13",
+    "title": "Do rest and travel affect postseason performance?",
     "status": "INCONCLUSIVE",
     "sample_size": 440,
     "findings": {
@@ -251,7 +251,7 @@
   },
   {
     "id": "Q14",
-    "title": "Q14",
+    "title": "Does the market price postseason favorites or public attention differently?",
     "status": "EVALUATED",
     "sample_size": 12084,
     "findings": {
@@ -279,51 +279,160 @@
   },
   {
     "id": "Q15",
-    "title": "Q15",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "title": "Does regular-season transfer outperform postseason adjustment?",
+    "status": "INCONCLUSIVE",
+    "sample_size": 362,
+    "findings": {
+      "comparison": "transfer vs adjusted",
+      "left": {
+        "brier": 0.25212424697419006,
+        "log_loss": 0.697871809244537,
+        "n": 362,
+        "status": "EVALUATED",
+        "strategy_id": "MLB_POST_XREG_001",
+        "verified_n": 100,
+        "verified_pnl": -637.6581486210146,
+        "verified_roi": -0.02035443195600238,
+        "win_rate": 0.5386740331491713
+      },
+      "right": {
+        "brier": 0.2582105457894204,
+        "log_loss": 0.7101552157899218,
+        "n": 362,
+        "status": "EVALUATED",
+        "strategy_id": "MLB_POST_ADJUSTED_001",
+        "verified_n": 100,
+        "verified_pnl": -5833.617050889054,
+        "verified_roi": -0.23072904528657542,
+        "win_rate": 0.49171270718232046
+      },
+      "delta_brier": 0.006086298815230318,
+      "rule": "Lower Brier is better; no model is promoted from a small sample."
+    },
+    "conclusion": "Transfer (A) Brier 0.2521 vs adjusted (B) 0.2582 on n=362. Delta +0.0061 against adjustment. Permanent experiment; no superiority is declared.",
     "env": "POST",
     "round_code": null,
-    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
+    "provenance": "Derived 2026-09-22 from EXP_A and EXP_B in this file (bets-table metrics). Calculation, not a new backtest."
   },
   {
     "id": "Q16",
-    "title": "Q16",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "title": "Does a dedicated postseason model outperform the transfer control?",
+    "status": "INCONCLUSIVE",
+    "sample_size": 362,
+    "findings": {
+      "comparison": "transfer vs dedicated series-state",
+      "left": {
+        "brier": 0.25212424697419006,
+        "log_loss": 0.697871809244537,
+        "n": 362,
+        "status": "EVALUATED",
+        "strategy_id": "MLB_POST_XREG_001",
+        "verified_n": 100,
+        "verified_pnl": -637.6581486210146,
+        "verified_roi": -0.02035443195600238,
+        "win_rate": 0.5386740331491713
+      },
+      "right": {
+        "brier": 0.25883389819662483,
+        "log_loss": 0.71949461204553,
+        "n": 122,
+        "status": "EVALUATED",
+        "strategy_id": "MLB_POST_SERIESSTATE_001",
+        "verified_n": 38,
+        "verified_pnl": 572.1891160572599,
+        "verified_roi": 0.029926803778383665,
+        "win_rate": 0.5409836065573771
+      },
+      "delta_brier": 0.006709651222434776,
+      "rule": "Lower Brier is better; series-state ROI uses n_verified=38 and is INSUFFICIENT_SAMPLE for an edge claim."
+    },
+    "conclusion": "Transfer (A) Brier 0.2521 n=362 vs series-state (C) 0.2588 n=122. Series-state verified ROI +3.0% on 38 priced bets is too small to promote. Permanent experiment; no superiority is declared.",
     "env": "POST",
     "round_code": null,
-    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
+    "provenance": "Derived 2026-09-22 from EXP_A and EXP_C in this file. Calculation, not a new backtest."
   },
   {
     "id": "Q17",
-    "title": "Q17",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "title": "Do round-specific models outperform one all-postseason model?",
+    "status": "INCONCLUSIVE",
+    "sample_size": 362,
+    "findings": {
+      "comparison": "all-post transfer vs round-specific Elo",
+      "left": {
+        "brier": 0.25212424697419006,
+        "log_loss": 0.697871809244537,
+        "n": 362,
+        "status": "EVALUATED",
+        "strategy_id": "MLB_POST_XREG_001",
+        "verified_n": 100,
+        "verified_pnl": -637.6581486210146,
+        "verified_roi": -0.02035443195600238,
+        "win_rate": 0.5386740331491713
+      },
+      "right": {
+        "brier": 0.2582105457894204,
+        "log_loss": 0.7101552157899218,
+        "n": 362,
+        "status": "EVALUATED",
+        "strategy_ids": [
+          "MLB_POST_WC_ELO_001",
+          "MLB_POST_DS_ELO_001",
+          "MLB_POST_LCS_ELO_001",
+          "MLB_POST_WS_ELO_001"
+        ],
+        "verified_n": 100,
+        "verified_pnl": -7746.5455941032715,
+        "verified_roi": -0.23568662379729555,
+        "win_rate": 0.49171270718232046
+      },
+      "delta_brier": 0.006086298815230318,
+      "rule": "Lower Brier is better; no model is promoted from a small sample."
+    },
+    "conclusion": "Transfer (A) Brier 0.2521 vs round-specific pool (D) 0.2582 on n=362. Round-specific models do not outperform the transfer control in this snapshot. Permanent experiment; no superiority is declared.",
     "env": "POST",
     "round_code": null,
-    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
+    "provenance": "Derived 2026-09-22 from EXP_A and EXP_D in this file. Calculation, not a new backtest."
   },
   {
     "id": "Q18",
-    "title": "Q18",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "title": "Does hierarchical partial pooling improve calibration?",
+    "status": "INCONCLUSIVE",
+    "sample_size": 385,
+    "findings": {
+      "comparison": "transfer vs hierarchical pooling",
+      "left": {
+        "brier": 0.25212424697419006,
+        "log_loss": 0.697871809244537,
+        "n": 362,
+        "status": "EVALUATED",
+        "strategy_id": "MLB_POST_XREG_001",
+        "verified_n": 100,
+        "verified_pnl": -637.6581486210146,
+        "verified_roi": -0.02035443195600238,
+        "win_rate": 0.5386740331491713
+      },
+      "right": {
+        "brier": 0.25941592611021336,
+        "log_loss": 0.7169949894817209,
+        "n": 385,
+        "status": "EVALUATED",
+        "strategy_id": "MLB_POST_HIERARCHICAL_001",
+        "verified_n": 123,
+        "verified_pnl": 2488.5987854218456,
+        "verified_roi": 0.04022183900850913,
+        "win_rate": 0.5376623376623376
+      },
+      "delta_brier": 0.007291679136023299,
+      "rule": "Lower Brier is better; hierarchical verified ROI +4.0% on 123 priced bets remains INCONCLUSIVE."
+    },
+    "conclusion": "Transfer (A) Brier 0.2521 n=362 vs hierarchical (E) 0.2594 n=385. Partial pooling does not improve calibration versus transfer in this snapshot. Permanent experiment; no superiority is declared.",
     "env": "POST",
     "round_code": null,
-    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
+    "provenance": "Derived 2026-09-22 from EXP_A and EXP_E in this file. Calculation, not a new backtest."
   },
   {
     "id": "Q19",
-    "title": "Q19",
+    "title": "Which market families have reliable historical prices?",
     "status": "EVALUATED",
     "sample_size": 48336,
     "findings": {
@@ -336,14 +445,18 @@
   },
   {
     "id": "Q20",
-    "title": "Q20",
-    "status": "NOT_RUN",
-    "sample_size": 0,
-    "findings": {},
-    "conclusion": "Queued for a dedicated experiment; required point-in-time variables or a registered model comparison are not present.",
+    "title": "Do model changes improve out-of-sample performance?",
+    "status": "EVALUATED",
+    "sample_size": 70,
+    "findings": {
+      "strategy_versions": 70,
+      "versions_with_parent": 0,
+      "note": "A later version is compared only on a future window; v1-only catalogs have nothing to promote."
+    },
+    "conclusion": "Every catalog entry is versioned. No subsequent modification has a registered parent comparison in this snapshot, so no model change is declared an improvement.",
     "env": "ALL",
     "round_code": null,
-    "provenance": "games.parquet; completed rows only; point-in-time feature and source gates apply."
+    "provenance": "strategy catalog versions in strategies.json (v1 only)."
   },
   {
     "id": "EXP_A",

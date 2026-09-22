@@ -121,6 +121,8 @@ def _leaderboard(strategies: list[dict], metrics: pd.DataFrame) -> list[dict]:
                               else 0),
             "status": strategy.get("status", "NOT_RUN"),
             "metric_status": m.metric_status if m is not None else "NO_DATA",
+            "experiment_alias": _is_experiment_alias(sid),
+            "alias_of": (strategy.get("extra") or {}).get("alias_of"),
             "pricing_note": ("No verified quote means EVAL/PROPOSED only; PnL and ROI "
                              "remain null. Brier/log loss score model calibration on "
                              "settled outcomes regardless of price."),
@@ -252,9 +254,15 @@ def _upcoming() -> list[dict[str, Any]]:
     return out_rows
 
 
+def _question_titles() -> dict[str, str]:
+    from ..config import RESEARCH_QUESTIONS
+    return dict(RESEARCH_QUESTIONS)
+
+
 def _research() -> list[dict[str, Any]]:
     findings = _db_frame("SELECT * FROM research_findings ORDER BY q_id")
     experiments = _db_frame("SELECT * FROM experiments ORDER BY exp_id")
+    titles = _question_titles()
     output = []
     if not findings.empty:
         for r in findings.itertuples():
@@ -262,7 +270,7 @@ def _research() -> list[dict[str, Any]]:
                 values = json.loads(r.stats_json) if r.stats_json else {}
             except (TypeError, json.JSONDecodeError):
                 values = {}
-            output.append({"id": r.q_id, "title": r.q_id, "status": r.verdict,
+            output.append({"id": r.q_id, "title": titles.get(r.q_id, r.q_id), "status": r.verdict,
                            "sample_size": int(r.n or 0), "findings": values,
                            "conclusion": r.evidence, "env": r.env,
                            "round_code": r.round_code, "provenance": r.provenance})
@@ -307,8 +315,34 @@ def _issues() -> list[dict[str, Any]]:
             for r in issues.itertuples()]
 
 
-def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
+EXPERIMENT_ALIAS_PREFIX = "MLB_POST_MODEL_"
+
+
+def _is_experiment_alias(strategy_id: str | None) -> bool:
+    return str(strategy_id or "").startswith(EXPERIMENT_ALIAS_PREFIX)
+
+
+def export(ledger_cap: int = LEDGER_CAP_DEFAULT, force: bool = False) -> dict[str, Any]:
+    """Project the database (or the safe empty catalog) to data/*.json.
+
+    Refuses to overwrite a committed SOURCE_SNAPSHOT when games.parquet is
+    missing, unless ``force`` is set.  That prevents a catalog-only rebuild
+    from silently erasing verified competition numbers.
+    """
     db.init_db()
+    source_snapshot = bool((FEAT / "games.parquet").exists())
+    existing_summary = DATA / "summary.json"
+    if existing_summary.exists() and not source_snapshot and not force:
+        try:
+            previous = json.loads(existing_summary.read_text())
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+        if previous.get("data_mode") == "SOURCE_SNAPSHOT":
+            raise RuntimeError(
+                "Refusing to overwrite a SOURCE_SNAPSHOT export because "
+                "data/features/games.parquet is missing. Re-run ingest/backtest "
+                "or pass --force to emit NO_SOURCE_SNAPSHOT."
+            )
     strategies = _strategy_records()
     metrics = _metrics()
     if not metrics.empty:
@@ -330,8 +364,11 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
         upcoming_games = int((no_score & future).sum())
         incomplete_historical = int((no_score & ~future).sum())
     env_breakdown = {}
+    unique_env_breakdown = {}
+    alias_ids = {s["sid"] for s in strategies if _is_experiment_alias(s.get("sid")) or s.get("extra", {}).get("alias_of")}
     for env in ["REG", "POST", *ROUNDS]:
         subset = metrics[metrics.env == env] if not metrics.empty else pd.DataFrame()
+        unique = subset[~subset.strategy_id.isin(alias_ids)] if not subset.empty else subset
         env_breakdown[env] = {
             "strategies": int(sum(s["env"] == env for s in strategies)),
             "records": int(subset.total_bets.sum()) if not subset.empty else 0,
@@ -343,6 +380,24 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
             "status": ("NO_DATA" if subset.empty else
                        "NO_VERIFIED_MARKET_PRICE" if subset.verified_bets.sum() == 0 else "EVALUATED"),
         }
+        unique_env_breakdown[env] = {
+            "strategies": int(sum(s["env"] == env and s["sid"] not in alias_ids for s in strategies)),
+            "records": int(unique.total_bets.sum()) if not unique.empty else 0,
+            "settled": int(unique.settled_bets.sum()) if not unique.empty else 0,
+            "evaluation_picks": int(unique.eval_picks.sum()) if not unique.empty else 0,
+            "verified_bets": int(unique.verified_bets.sum()) if not unique.empty else 0,
+            "verified_pnl": (round(float(unique.total_pnl.sum()), 2)
+                             if not unique.empty and unique.verified_bets.sum() > 0 else None),
+            "status": ("NO_DATA" if unique.empty else
+                       "NO_VERIFIED_MARKET_PRICE" if unique.verified_bets.sum() == 0 else "EVALUATED"),
+        }
+    unique_verified = (metrics[~metrics.strategy_id.isin(alias_ids)]
+                       if not metrics.empty else metrics)
+    unique_pnl = None
+    if not unique_verified.empty:
+        priced = unique_verified[unique_verified.verified_bets.fillna(0) > 0]
+        if not priced.empty and priced.total_pnl.notna().any():
+            unique_pnl = round(float(priced.total_pnl.fillna(0).sum()), 2)
     # A fetch manifest alone is not a usable model snapshot; normalized games
     # must pass ingest before the site leaves its safe empty mode.
     source_snapshot = bool((FEAT / "games.parquet").exists())
@@ -360,7 +415,11 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
         "total_strategies": len(strategies), "total_simulated_bets": len(bets),
         "settled_bets": int((bets.status == "SETTLED").sum()) if not bets.empty else 0,
         "total_simulated_pnl": round(real_pnl, 2) if real_pnl is not None else None,
+        "unique_verified_pnl": unique_pnl,
         "pnl_basis": "Verified observed quotes only; no price means no stake, PnL or ROI.",
+        "alias_note": ("MLB_POST_MODEL_A–E are experiment aliases of catalog strategies. "
+                       "environment_breakdown includes them; unique_environment_breakdown and "
+                       "unique_verified_pnl exclude them so POST PnL is not double-counted."),
         "total_upcoming_bets": len(_upcoming()), "total_open_positions": int(_db_frame("SELECT * FROM positions WHERE state='OPEN'").shape[0]),
         "total_kalshi_trades": int(_db_frame("SELECT * FROM immutable_ledger WHERE market='PREDICTION_MARKET'").shape[0]),
         "kalshi_status": "OPTIONAL — no contracts, quotes, fills or liquidity are created without verified API observations",
@@ -373,6 +432,7 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
                         "The static export may be capped for page size."),
         "top_performing_strategy": None, "top_pnl": None, "top_roi": None,
         "environment_breakdown": env_breakdown,
+        "unique_environment_breakdown": unique_env_breakdown,
         "limitations": [
             "Source snapshot via api.github.com blobs: sportsdataverse/baseballr-data (schedule+play-by-play) + cesar-dx/mlb-betting-ml (moneyline) — content-addressed and cross-checked." if source_snapshot else "This checkout contains no fetched source snapshot unless data/raw or data/features is populated.",
             "Historical odds without an observed decision-time timestamp are not eligible for paper PnL; evaluation uses scores for Brier/log-loss only.",
@@ -401,7 +461,9 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ledger-cap", type=int, default=LEDGER_CAP_DEFAULT)
+    parser.add_argument("--force", action="store_true",
+                        help="Allow overwriting a SOURCE_SNAPSHOT export with NO_SOURCE_SNAPSHOT")
     args = parser.parse_args()
-    result = export(args.ledger_cap)
+    result = export(args.ledger_cap, force=args.force)
     print(json.dumps({"data_mode": result["data_mode"], "strategies": result["total_strategies"],
                       "bets": result["total_simulated_bets"]}, indent=2))
