@@ -10,7 +10,7 @@
   "completed_games": 27972,
   "upcoming_games": 91,
   "incomplete_historical_games": 9,
-  "total_strategies": 70,
+  "total_strategies": 90,
   "total_simulated_bets": 154688,
   "settled_bets": 33143,
   "total_simulated_pnl": -96903.05,
@@ -29,7 +29,7 @@
   "top_roi": null,
   "environment_breakdown": {
     "REG": {
-      "strategies": 39,
+      "strategies": 51,
       "records": 150346,
       "settled": 31851,
       "evaluation_picks": 92627,
@@ -38,7 +38,7 @@
       "status": "EVALUATED"
     },
     "POST": {
-      "strategies": 14,
+      "strategies": 19,
       "records": 3473,
       "settled": 1031,
       "evaluation_picks": 2442,
@@ -47,7 +47,7 @@
       "status": "EVALUATED"
     },
     "WC": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 165,
       "settled": 18,
       "evaluation_picks": 147,
@@ -56,7 +56,7 @@
       "status": "EVALUATED"
     },
     "DS": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 343,
       "settled": 117,
       "evaluation_picks": 226,
@@ -65,7 +65,7 @@
       "status": "EVALUATED"
     },
     "LCS": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 233,
       "settled": 77,
       "evaluation_picks": 156,
@@ -74,7 +74,7 @@
       "status": "EVALUATED"
     },
     "WS": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 128,
       "settled": 49,
       "evaluation_picks": 79,
@@ -92,7 +92,7 @@
   "unique_verified_pnl": -89575.37,
   "unique_environment_breakdown": {
     "REG": {
-      "strategies": 39,
+      "strategies": 51,
       "records": 150346,
       "settled": 31851,
       "evaluation_picks": 92627,
@@ -101,7 +101,7 @@
       "status": "EVALUATED"
     },
     "POST": {
-      "strategies": 10,
+      "strategies": 14,
       "records": 1617,
       "settled": 485,
       "evaluation_picks": 1132,
@@ -110,7 +110,7 @@
       "status": "EVALUATED"
     },
     "WC": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 165,
       "settled": 18,
       "evaluation_picks": 147,
@@ -119,7 +119,7 @@
       "status": "EVALUATED"
     },
     "DS": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 343,
       "settled": 117,
       "evaluation_picks": 226,
@@ -128,7 +128,7 @@
       "status": "EVALUATED"
     },
     "LCS": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 233,
       "settled": 77,
       "evaluation_picks": 156,
@@ -137,7 +137,7 @@
       "status": "EVALUATED"
     },
     "WS": {
-      "strategies": 4,
+      "strategies": 5,
       "records": 128,
       "settled": 49,
       "evaluation_picks": 79,
@@ -148,5 +148,11 @@
   },
   "alias_note": "MLB_POST_MODEL_A\u2013E are experiment aliases of catalog strategies. environment_breakdown includes them; unique_environment_breakdown and unique_verified_pnl exclude them so POST PnL is not double-counted.",
   "audit_pass": "2026-09-22 adversarial audit: analytics-detail crash, Q15\u2013Q18 wiring, alias double-count, export wipe guard.",
-  "report_date": "2026-09-22"
+  "report_date": "2026-09-22",
+  "total_competition_entrants": 57,
+  "total_competitions": 10,
+  "competition_seed": "mlbcomp-competitions|2026-09-22|v1",
+  "competition_generator": "competition-engine/v1",
+  "competitions_built_at": "2026-09-22T23:51:04Z",
+  "competitions_note": "Simulated competitions: randomized window start dates (recorded seed) over the committed verified export; entrants are personas bound to transparent strategy slices; standings are deterministic re-aggregations of real records; PnL is published only where VERIFIED_PRICE rows exist in the window."
 }
