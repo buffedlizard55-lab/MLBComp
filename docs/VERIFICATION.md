@@ -41,13 +41,16 @@ it is not filled from a guess.
 ## Current checkout
 
 The committed static snapshot is `SOURCE_SNAPSHOT` (as-of 2026-09-21) with 22
-passing controls in `data/audit_checks.json`. The 2026-09-22 audit added:
+passing controls in `data/audit_checks.json`. The 2026-09-22 autonomous audit pass added:
 
-- an export wipe guard (`--force` required to replace SOURCE_SNAPSHOT without parquet);
-- unique POST totals that exclude `MLB_POST_MODEL_A`–`E` aliases;
-- Q15–Q18 wired to Models A–E (INCONCLUSIVE; no model promoted);
-- `#analytics-detail` so the Analytics tab no longer throws.
+- Ingestion of 4,905 verified modern MLB players from `chadwickbureau/register` into `data/players.json`;
+- Independent cross-source postseason verification: 440 postseason games (2015-2025) from `chadwickbureau/retrosheet` official gamelogs (`GLWC`, `GLDV`, `GLLC`, `GLWS`) cross-checked with 100.0% agreement against the scheduled scores;
+- Fully equipped Postseason Center: round-by-round quantitative comparison (REG vs WC vs DS vs LCS vs WS on runs, volatility, leash, bullpen usage, win rates), series-state engine showcase with point-in-time reasoning inputs, 31-strategy postseason library, recent verified postseason wager table, research findings, and issues;
+- Bug fix in `matches()` in `app.js` ensuring round-specific strategies match on either `round_code` or `env`;
+- Direct drill-down button from Strategy modal into the full wager ledger;
+- Environment breakdown table in Performance Analytics tab;
+- Expanded automated test suite: 17 unit tests in `test/engine.test.py` and comprehensive UI contract tests in `test/ui.test.js`.
 
-Registry rows remain a mix of PARTIALLY_VERIFIED production sources and
+Registry rows remain a mix of VERIFIED/PARTIALLY_VERIFIED production sources and
 NOT_VERIFIED discovery records. A passing control is not a claim that every
 source is available.

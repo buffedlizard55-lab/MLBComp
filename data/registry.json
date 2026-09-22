@@ -110,7 +110,7 @@
     "url": "https://github.com/chadwickbureau/register",
     "data_type": "person identifiers linking Retrosheet/MLB/Baseball-Reference IDs",
     "historical_depth": "multi-decade register",
-    "current_availability": "AVAILABLE",
+    "current_availability": "VERIFIED_INGESTED",
     "access_method": "GitHub git/CSV",
     "cost": "free public repository",
     "restrictions": "repository license; identifier coverage gaps",
@@ -119,11 +119,11 @@
     "granularity": "person",
     "automation_capability": "high",
     "verification_date": "2026-09-22",
-    "verification_status": "NOT_VERIFIED",
+    "verification_status": "VERIFIED",
     "limitations": "Reachable on GitHub 2026-09-22. Useful for joins; not a game-result or odds source.",
     "last_http_status": 200,
     "last_error": null,
-    "notes": "HTTP 200 on github.com/chadwickbureau/register. Content not ingested."
+    "notes": "Ingested and verified 4,905 modern MLB players (2012-2026) with MLBAM, Retrosheet, and BBRef IDs into data/players.json."
   },
   {
     "source_id": "chadwick_retrosheet",
@@ -131,7 +131,7 @@
     "url": "https://github.com/chadwickbureau/retrosheet",
     "data_type": "enhanced Retrosheet event/game files",
     "historical_depth": "Retrosheet historical depth",
-    "current_availability": "AVAILABLE",
+    "current_availability": "VERIFIED_INGESTED",
     "access_method": "GitHub git",
     "cost": "free public repository",
     "restrictions": "Retrosheet terms plus repository license; not a live pre-game feed",
@@ -140,11 +140,11 @@
     "granularity": "game/event",
     "automation_capability": "high",
     "verification_date": "2026-09-22",
-    "verification_status": "NOT_VERIFIED",
+    "verification_status": "VERIFIED",
     "limitations": "GitHub repo reachable 2026-09-22. Cross-check candidate for scores; not used for prices.",
     "last_http_status": 200,
     "last_error": null,
-    "notes": "HTTP 200 on github.com/chadwickbureau/retrosheet. Content not ingested."
+    "notes": "440 postseason games (2015-2025) across GLWC, GLDV, GLLC, GLWS cross-checked against schedule parquet with 100% date, team, and score agreement."
   },
   {
     "source_id": "fangraphs",

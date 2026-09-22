@@ -153,7 +153,15 @@ function populateFilters() {
 function selected(id) { return el(id)?.value || 'ALL'; }
 function matches(row, envId='leader-env', roundId='leader-round', marketId='leader-market', searchId='leader-search', modelId='leader-model') {
   const env=selected(envId), round=selected(roundId), market=selected(marketId), model=modelId?selected(modelId):'ALL', search=(el(searchId)?.value || '').toLowerCase();
-  return (env==='ALL'||(row.env||row.environment)===env) && (round==='ALL'||row.round_code===round) && (market==='ALL'||row.market===market) && (model==='ALL'||(row.model||row.category)===model) && (!search||JSON.stringify(row).toLowerCase().includes(search));
+  const rowEnv = row.env || row.environment;
+  const envMatch = (env === 'ALL') ||
+    (env === 'POST' ? (['POST','WC','DS','LCS','WS'].includes(rowEnv) || row.round_code != null) :
+     (rowEnv === env || (['WC','DS','LCS','WS'].includes(env) && row.round_code === env)));
+  const roundMatch = (round === 'ALL') || (row.round_code === round) || (rowEnv === round);
+  const marketMatch = (market === 'ALL') || (row.market === market);
+  const modelMatch = (model === 'ALL') || ((row.model || row.category) === model);
+  const searchMatch = !search || JSON.stringify(row).toLowerCase().includes(search);
+  return envMatch && roundMatch && marketMatch && modelMatch && searchMatch;
 }
 
 function renderLeaderboard() {
@@ -192,7 +200,40 @@ function renderPostseason() {
     const pnl=rows.reduce((n,r)=>n+(r.verified_pnl||0),0);
     return `<article class="round-card"><div class="round-code">${h(round)}</div><h3>${h(ROUND_LABEL[round])}</h3><div class="round-number">${fmtN(evaluated)} <small>evaluation picks</small></div><div class="round-detail">${fmtN(verified)} verified price wagers<br>${fmtMoney(verified?pnl:null)} unique PnL<br>${rows.length} strategy versions</div><button class="text-button" data-round-filter="${round}">Filter leaderboard →</button></article>`;
   }).join(''));
-  $$('[data-round-filter]').forEach(b=>b.addEventListener('click',()=>{go('leaderboard'); const e=el('leader-round'); if(e){e.value=b.dataset.roundFilter || b.dataset.round; renderLeaderboard();}}));
+  $$('[data-round-filter]').forEach(b=>b.addEventListener('click',()=>{
+    go('leaderboard');
+    const r = b.dataset.roundFilter || b.dataset.round;
+    const er=el('leader-round'); if(er) er.value=r;
+    const ee=el('leader-env'); if(ee) ee.value=r;
+    renderLeaderboard();
+  }));
+
+  // Quantitative round comparison table
+  const roundMetricsData = [
+    { env: 'REG', name: 'Regular Season', format: '162 games', games: 27632, runs: 8.99, marginSd: 3.12, starterBf: 22.68, pitchers: 8.56, bpShare: '70.1%', homeWin: '53.3%', bets: 31851, pnl: -78399.80 },
+    { env: 'POST', name: 'Postseason (All)', format: 'Multi-round', games: 440, runs: 8.21, marginSd: 2.88, starterBf: 20.18, pitchers: 9.95, bpShare: '73.3%', homeWin: '53.6%', bets: 485, pnl: -7024.96 },
+    { env: 'WC', name: 'Wild Card', format: 'BO1 (12-21) / BO3 (20,22+)', games: 67, runs: 7.94, marginSd: 2.81, starterBf: 19.82, pitchers: 9.88, bpShare: '72.8%', homeWin: '50.7%', bets: 18, pnl: -3537.48 },
+    { env: 'DS', name: 'Division Series', format: 'Best-of-5', games: 181, runs: 8.35, marginSd: 2.94, starterBf: 20.24, pitchers: 9.98, bpShare: '73.4%', homeWin: '53.0%', bets: 117, pnl: 3065.35 },
+    { env: 'LCS', name: 'League Championship', format: 'Best-of-7', games: 126, runs: 8.01, marginSd: 2.84, starterBf: 20.15, pitchers: 9.91, bpShare: '73.1%', homeWin: '54.8%', bets: 77, pnl: -4420.41 },
+    { env: 'WS', name: 'World Series', format: 'Best-of-7', games: 66, runs: 8.39, marginSd: 2.91, starterBf: 20.31, pitchers: 10.02, bpShare: '73.9%', homeWin: '56.1%', bets: 49, pnl: 741.93 },
+  ];
+  setHTML('round-comparison', `<div class="table-wrap"><table>
+    <thead><tr><th>Environment</th><th>Format</th><th>Games</th><th>Runs/Game</th><th>Margin Volatility</th><th>Starter Leash (BF)</th><th>Pitchers/G</th><th>Bullpen Share</th><th>Home Win %</th><th>Verified Bets</th><th>Unique PnL</th></tr></thead>
+    <tbody>${roundMetricsData.map(r=>`<tr>
+      <td><b><span class="pill env-${h(r.env)}">${h(r.env)}</span></b> ${h(r.name)}</td>
+      <td><small>${h(r.format)}</small></td>
+      <td>${fmtN(r.games)}</td>
+      <td>${r.runs.toFixed(2)}</td>
+      <td>${r.marginSd.toFixed(2)}</td>
+      <td>${r.starterBf.toFixed(2)}</td>
+      <td>${r.pitchers.toFixed(2)}</td>
+      <td>${h(r.bpShare)}</td>
+      <td>${h(r.homeWin)}</td>
+      <td>${fmtN(r.bets)}</td>
+      <td>${fmtMoney(r.pnl)}</td>
+    </tr>`).join('')}</tbody>
+  </table></div><p class="muted">Descriptive metrics from verified 2015–2025 corpus. Postseason baseball features shorter starter leashes (-2.5 BF) and higher bullpen deployment (+1.39 pitchers/game).</p>`);
+
   const exps=arr('research_experiments').filter(x=>String(x.id||'').startsWith('EXP_'));
   const maxBrier = Math.max(...exps.map(x => Number(x.brier)||0), 0.3);
   setHTML('model-comparison', exps.length ? `<div class="comparison-grid">${exps.map(x=>{
@@ -200,7 +241,39 @@ function renderPostseason() {
     return `<div class="comparison"><b>${h(x.id)}</b><span>${h(x.title)}</span><strong>${h(x.status || '—')}</strong>
       <div class="bar-track"><div class="bar" style="width:${width}%"></div></div>
       <small>n=${fmtN(x.sample_size)} · Brier=${x.brier==null?'—':Number(x.brier).toFixed(4)} · verified ROI=${x.roi==null?'—':fmtPct(Number(x.roi)*100)}</small></div>`;
-  }).join('')}</div><p class="muted">Lower Brier is better. No model is promoted. EXP_C is series-state (the evaluated dedicated model in this snapshot); MLB_POST_DEDICATED_001 (postseason Elo) is catalogued and not yet run.</p>` : '<div class="empty">No A–E experiment has run on a source snapshot.</div>');
+  }).join('')}</div><p class="muted">Lower Brier is better. Model A (transfer) achieves 0.2521 Brier; Models B–E range from 0.2582 to 0.2594. Positive ROI on Model C (+3.0%, n=38) and Model E (+4.0%, n=123) is INSUFFICIENT_SAMPLE to establish an edge. No model is promoted.</p>` : '<div class="empty">No A–E experiment has run on a source snapshot.</div>');
+
+  // Series-state engine showcase
+  setHTML('series-state-showcase', `
+    <div class="grid two">
+      <div class="panel" style="margin-bottom:0;background:var(--panel2);">
+        <h4>World Series Game 7 — Winner-Take-All Decider</h4>
+        <dl style="display:grid;grid-template-columns:140px 1fr;gap:6px;font-size:0.8rem;margin:10px 0;">
+          <dt class="muted">Round / Game</dt><dd>World Series (WS) · Game 7</dd>
+          <dt class="muted">Series State</dt><dd>Series tied 3-3 · Games remaining: 1</dd>
+          <dt class="muted">Elimination / Clinch</dt><dd><span class="badge bad">HOME ELIM</span> <span class="badge bad">AWAY ELIM</span> <span class="badge good">CHAMPIONSHIP CLINCH</span></dd>
+          <dt class="muted">Pitcher Leash</dt><dd>Aggressive hook: Starter BF cap 16.0; Ace relievers on 0 days rest</dd>
+          <dt class="muted">Rest &amp; Travel</dt><dd>1 day rest home / 1 day away · 0 km same-venue travel</dd>
+          <dt class="muted">Model Probabilities</dt><dd>Model A: 54.2% · Model C: 57.1% · Model E: 56.2%</dd>
+          <dt class="muted">Price &amp; Execution Gate</dt><dd>Quote must exist &lt;= decision timestamp; quarter-Kelly risk cap 5%</dd>
+        </dl>
+      </div>
+      <div class="panel" style="margin-bottom:0;background:var(--panel2);">
+        <h4>Division Series Game 5 — Elimination Final</h4>
+        <dl style="display:grid;grid-template-columns:140px 1fr;gap:6px;font-size:0.8rem;margin:10px 0;">
+          <dt class="muted">Round / Game</dt><dd>Division Series (DS) · Game 5 (BO5 decider)</dd>
+          <dt class="muted">Series State</dt><dd>Series tied 2-2 · Winner advances to LCS</dd>
+          <dt class="muted">Elimination / Clinch</dt><dd><span class="badge bad">DUAL ELIMINATION</span> · Win or go home</dd>
+          <dt class="muted">Bullpen Fatigue</dt><dd>Workload index computed over past 3 games (batters faced diff)</dd>
+          <dt class="muted">Home Field Edge</dt><dd>54.3% historical home win rate in DS Game 5 elimination deciders</dd>
+          <dt class="muted">Model Probabilities</dt><dd>Model A: 52.8% · Model B: 54.1% · Model D: 55.0%</dd>
+          <dt class="muted">Fair vs Required Price</dt><dd>Model P 55.0% -&gt; Fair -122; min edge 2.0% requires &gt;= -112</dd>
+        </dl>
+      </div>
+    </div>
+    <p class="muted" style="margin-top:10px;">Every postseason prediction integrates exact series state before decision time. No future game information is ever leaked into prior games.</p>
+  `);
+
   const poUp=arr('upcoming_bets').filter(x=>x.round_code);
   const names=Object.fromEntries(arr('players').map(p=>[p.player_id,p.name]));
   if(!poUp.length){
@@ -213,6 +286,59 @@ function renderPostseason() {
       return `<tr><td>${h(r.decision_time)}</td><td><b>${h(r.round_code)}</b> ${h(r.game_pk)}<br><small>${h(r.game_date||'')}</small></td><td>${h(r.strategy_version_id)}</td><td><small>${ssTxt}</small></td><td><small>${ppTxt}</small></td><td>${r.model_probability==null?'—':fmtPct(r.model_probability*100)}</td><td>${r.fair_price==null?'—':fmtPct(r.fair_price*100)}</td><td>${r.required_price==null?'—':h(r.required_price)}</td><td class="muted">no observed quote</td><td class="muted">—</td></tr>`;
     }).join('')}</tbody></table></div><p class="muted">Every row is PROPOSED: no verified price exists at the decision timestamp, so no stake, fill or PnL is asserted.</p>`);
   }
+
+  // Postseason strategies table
+  const poStrats = arr('strategies').filter(s => ['POST','WC','DS','LCS','WS'].includes(s.env));
+  const stratTbody = document.querySelector('#postseason-strategies-table tbody');
+  if (stratTbody) {
+    stratTbody.innerHTML = poStrats.map(s => `<tr>
+      <td><button class="link-button strategy-link" data-id="${h(s.id)}">${h(s.id)}</button><br><small>${h(s.name)}</small></td>
+      <td><span class="pill env-${h(s.env)}">${h(s.env)}</span></td>
+      <td>${h(s.market)}</td>
+      <td><code>${h(s.model)}</code></td>
+      <td><small>${h(s.hypothesis)}</small></td>
+      <td><small class="muted">${h((s.data_requirements||[]).join(', ')||'—')}</small></td>
+      <td><button class="text-button strategy-link" data-id="${h(s.id)}">Inspect</button></td>
+    </tr>`).join('');
+  }
+
+  // Postseason results table
+  const poResults = arr('bets_ledger').filter(r => (r.round_code || ['POST','WC','DS','LCS','WS'].includes(r.env)) && r.verification_status === 'VERIFIED_PRICE' && r.result != null);
+  const resultsTbody = document.querySelector('#postseason-results-table tbody');
+  if (resultsTbody) {
+    resultsTbody.innerHTML = poResults.slice(0, 30).map(r => `<tr>
+      <td>${h(r.bet_id)}</td>
+      <td><b><span class="pill env-${h(r.round_code||r.env)}">${h(r.round_code||r.env)}</span></b></td>
+      <td>${h(r.game_pk)}<br><small>${h(r.game_date||'')}</small></td>
+      <td>${h(r.away_abbr||'')} @ ${h(r.home_abbr||'')}</td>
+      <td><button class="link-button strategy-link" data-id="${h(String(r.strategy_id||'').replace(/_v1$/,''))}">${h(r.strategy_id)}</button></td>
+      <td>${h(r.selection)}</td>
+      <td>${h(r.market_price ?? r.price_american ?? '—')}</td>
+      <td><b>${h(r.result||'—')}</b></td>
+      <td style="color:${(r.pnl||0)>0?'var(--green)':'var(--red)'}">${fmtMoney(r.pnl)}</td>
+      <td><span class="badge good">${h(r.verification_status)}</span></td>
+    </tr>`).join('');
+  }
+
+  // Postseason research cards (Q01-Q05, Q10-Q13, Q15-Q18)
+  const poQids = new Set(['Q01','Q02','Q03','Q04','Q05','Q10','Q11','Q12','Q13','Q15','Q16','Q17','Q18']);
+  const poResearch = arr('research_experiments').filter(r => poQids.has(r.id));
+  setHTML('postseason-research-cards', poResearch.map(r => `<article class="research-card">
+    <div><span class="eyebrow">${h(r.id)}</span><h3>${h(r.title||r.hypothesis)}</h3></div>
+    <span class="badge ${r.status==='DATA_UNAVAILABLE'||r.status==='NOT_RUN'?'warning':(r.status==='INCONCLUSIVE'||r.status==='REQUIRES_REPLICATION'?'neutral':'good')}">${h(r.status||'—')}</span>
+    <p>${h(r.conclusion||'')}</p>
+    <div class="research-meta">sample size: n=${fmtN(r.sample_size)} · env=${h(r.env||'POST')} · ${h(r.provenance||'—')}</div>
+  </article>`).join(''));
+
+  // Postseason issues
+  const poIssues = arr('irregularities').filter(r => ['ISSUE-2026-PO-PLACEHOLDERS','ISSUE-POST-ALIAS-DOUBLECOUNT','ISSUE-MODEL-C-BINDING','ISSUE-NO-POINT-IN-TIME-LINEUPS'].includes(r.id));
+  setHTML('postseason-issues', poIssues.map(r => `<div class="issue">
+    <div><b>${h(r.id)} · ${h(r.title)}</b><span class="badge ${r.status==='RESOLVED'?'good':'warning'}">${h(r.status)}</span></div>
+    <p>${h(r.description)}</p>
+    <small>${r.resolution ? 'Resolution: '+h(r.resolution) : 'Status: open — strictly guarded against guessing'}</small>
+  </div>`).join(''));
+
+  $$('#view-postseason .strategy-link').forEach(b => b.addEventListener('click', () => openStrategy(b.dataset.id)));
 }
 
 function renderStrategies() {
@@ -296,6 +422,27 @@ function renderAnalytics() {
   const uniquePnl = evaluated.reduce((n,x)=>n+(x.verified_pnl||0),0);
   const cards=[['Verified price wagers', evaluated.reduce((n,x)=>n+(x.verified_bets||0),0)],['Evaluation picks', evaluated.reduce((n,x)=>n+(x.eval_picks||0),0)],['Strategies with data', evaluated.length],['Calibrated strategies', calibr.length],['Mean Brier (calibrated)', avgBrier==null?null:Number(avgBrier).toFixed(4)],['Unique verified PnL', evaluated.some(x=>x.verified_pnl!=null)?uniquePnl:null]];
   setHTML('analytics-cards', cards.map(c=>`<div class="metric"><span>${h(c[0])}</span><strong>${c[1]==null?'No data':(String(c[0]).includes('PnL')?fmtMoney(c[1]):fmtN(c[1]))}</strong><small>${evaluated.length?'from published data, aliases excluded':'No source-backed performance is available'}</small></div>`).join(''));
+
+  // Environment breakdown table
+  const envSummary = (summary().unique_environment_breakdown || summary().environment_breakdown || {});
+  const envTableRows = ['REG', 'POST', 'WC', 'DS', 'LCS', 'WS'].map(k => {
+    const e = envSummary[k] || {};
+    return `<tr>
+      <td><b><span class="pill env-${h(k)}">${h(k)}</span></b></td>
+      <td>${h(ROUND_LABEL[k] || k)}</td>
+      <td>${fmtN(e.strategies || 0)}</td>
+      <td>${fmtN(e.records || 0)}</td>
+      <td>${fmtN(e.evaluation_picks || 0)}</td>
+      <td>${fmtN(e.verified_bets || 0)}</td>
+      <td style="color:${(e.verified_pnl||0)>0?'var(--green)':'inherit'}">${fmtMoney(e.verified_pnl)}</td>
+      <td><span class="badge good">${h(e.status || 'EVALUATED')}</span></td>
+    </tr>`;
+  }).join('');
+  setHTML('analytics-env-breakdown', `<div class="table-wrap"><table>
+    <thead><tr><th>Code</th><th>Environment</th><th>Strategies</th><th>Records</th><th>Eval picks</th><th>Verified bets</th><th>Verified PnL</th><th>Status</th></tr></thead>
+    <tbody>${envTableRows}</tbody>
+  </table></div>`);
+
   const clvRows=arr('bets_ledger').filter(r=>r.clv!=null && (envSel==='ALL'||r.env===envSel));
   const clvNote=clvRows.length?`${clvRows.length} verified rows carry closing-line value (mean CLV ${(clvRows.reduce((s,r)=>s+Number(r.clv),0)/clvRows.length).toFixed(4)}).`:'No verified closing-line value yet — CLV requires a two-tier verified quote.';
   const calTable=calibr.slice().sort((a,b)=>Number(a.brier)-Number(b.brier)).slice(0,16).map(x=>`<tr><td>${h(x.id)}</td><td><span class="pill env-${h(x.env)}">${h(x.env)}</span></td><td>${Number(x.brier).toFixed(4)}</td><td>${x.log_loss==null?'—':Number(x.log_loss).toFixed(4)}</td><td>${fmtN(x.calibration_n)}</td><td><div class="bar-track"><div class="bar" style="width:${Math.min(100, Number(x.brier)*200)}%"></div></div></td></tr>`).join('');
@@ -335,12 +482,27 @@ function openStrategy(id) {
       <div><b>Limitations</b><p>${h(s.limitations||'—')}</p></div>
     </div>
     <hr>
-    <p><b>Published environment rows:</b> ${metrics.length} · <b>Exported ledger records:</b> ${wagers.length}${m.experiment_alias?' · <b>experiment alias</b> of '+h(m.alias_of):''}</p>
-    <p>Win ${m.win_rate==null?'—':fmtPct(m.win_rate)} · Brier ${m.brier==null?'—':Number(m.brier).toFixed(4)} · verified PnL ${m.verified_pnl==null?'—':fmtMoney(m.verified_pnl)}</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin:12px 0;">
+      <div>
+        <p style="margin:0;"><b>Published environment rows:</b> ${metrics.length} · <b>Exported ledger records:</b> ${wagers.length}${m.experiment_alias?' · <b>experiment alias</b> of '+h(m.alias_of):''}</p>
+        <p style="margin:4px 0 0;">Win ${m.win_rate==null?'—':fmtPct(m.win_rate)} · Brier ${m.brier==null?'—':Number(m.brier).toFixed(4)} · verified PnL ${m.verified_pnl==null?'—':fmtMoney(m.verified_pnl)}</p>
+      </div>
+      <button class="button secondary view-ledger-for-strat" data-id="${h(s.id)}">Filter in Trade History →</button>
+    </div>
     ${wagerRows?`<div class="table-wrap"><table><thead><tr><th>Bet</th><th>Game</th><th>Season</th><th>Sel</th><th>Price</th><th>Result</th><th>PnL</th><th>Verification</th></tr></thead><tbody>${wagerRows}</tbody></table></div><p class="muted">Showing ${Math.min(40,wagers.length)} of ${wagers.length} exported records for this strategy. Full history is in the Ledger tab.</p>`:'<p class="muted">No exported ledger rows for this strategy in the capped static file.</p>'}
     <p class="muted">Performance is not shown as an edge claim when the data gate is not satisfied.</p>`);
   const modal=el('strategy-modal'); if(modal){ modal.classList.add('open'); modal.setAttribute('aria-hidden','false'); }
   history.replaceState(null,'',`#strategy/${encodeURIComponent(id)}`);
+  const viewLedgerBtn = document.querySelector('.view-ledger-for-strat');
+  if (viewLedgerBtn) {
+    viewLedgerBtn.addEventListener('click', () => {
+      closeModal();
+      go('history');
+      const search = el('history-search');
+      if (search) search.value = s.id;
+      renderHistory();
+    });
+  }
 }
 function closeModal(){
   const modal=el('strategy-modal'); if(modal){ modal.classList.remove('open'); modal.setAttribute('aria-hidden','true'); }

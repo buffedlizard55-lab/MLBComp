@@ -11,6 +11,13 @@ assert.ok(html.includes('id="history-pager"'));
 assert.ok(html.includes('leader-alias'));
 assert.ok(html.includes('history-game'));
 assert.ok(html.includes('history-player'));
+assert.ok(html.includes('id="round-comparison"'), 'Postseason Center requires #round-comparison');
+assert.ok(html.includes('id="series-state-showcase"'), 'Postseason Center requires #series-state-showcase');
+assert.ok(html.includes('id="postseason-strategies-table"'), 'Postseason Center requires #postseason-strategies-table');
+assert.ok(html.includes('id="postseason-results-table"'), 'Postseason Center requires #postseason-results-table');
+assert.ok(html.includes('id="postseason-research-cards"'), 'Postseason Center requires #postseason-research-cards');
+assert.ok(html.includes('id="postseason-issues"'), 'Postseason Center requires #postseason-issues');
+assert.ok(html.includes('id="analytics-env-breakdown"'), 'Analytics requires #analytics-env-breakdown');
 
 const summary = read('summary.json');
 assert.ok(['NO_SOURCE_SNAPSHOT', 'SOURCE_SNAPSHOT'].includes(summary.data_mode));
@@ -66,4 +73,9 @@ assert.ok(registry.length >= 10);
 for (const source of registry) {
   for (const key of ['name', 'url', 'data_type', 'historical_depth', 'access_method', 'cost', 'restrictions', 'licensing', 'reliability', 'granularity', 'automation_capability', 'verification_status', 'limitations']) assert.ok(key in source, `${key} missing from ${source.name}`);
 }
-console.log(`UI data contract passed: ${strategies.length} strategies, ${checks.length} controls, ${ledger.length} ledger rows`);
+
+const players = read('players.json');
+assert.ok(Array.isArray(players) && players.length >= 4000, 'players register must be populated with >=4000 modern players');
+assert.ok(players[0].player_id && players[0].name && players[0].mlb_id);
+
+console.log(`UI data contract passed: ${strategies.length} strategies, ${checks.length} controls, ${ledger.length} ledger rows, ${players.length} players`);
