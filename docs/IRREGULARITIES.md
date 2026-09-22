@@ -25,7 +25,12 @@ link. Historical records are not silently rewritten.
    Future runs bind MODEL_C to dedicated postseason Elo. Metrics are not rewritten.
 7. **Egress.** statsapi.mlb.com, retrosheet.org, baseballsavant, weather.gov
    and Kalshi TLS-fail from this environment (re-checked 2026-09-22). GitHub
-   remains reachable.
+   remains reachable via REST blobs API.
+8. **Resolved on 2026-09-22:**
+   - `OPEN-CLOSE-REFRESH-FAILED`: `pyreadr>=0.5.0` installed and tested.
+   - `ISSUE-PLAYERS-JSON-EMPTY`: Populated with 4,905 modern MLB players (2012–2026) from `chadwickbureau/register`.
+   - `ISSUE-LEADERBOARD-ROUND-FILTER`: Fixed `matches()` in `app.js` to match round filters on `round_code` or `env`.
+   - `chadwickbureau/retrosheet` cross-verification completed: 440 postseason games 2015–2025 match schedule scores 100%.
 
 ## Resolution policy
 

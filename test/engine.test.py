@@ -204,5 +204,49 @@ class TestMLBCompEngine(unittest.TestCase):
                 conn.execute('DELETE FROM immutable_ledger')
 
 
+    def test_postseason_round_formats(self):
+        from mlbcomp.config import round_needed, round_format_label
+        self.assertEqual(round_needed('WC', 2019), 1)
+        self.assertEqual(round_needed('WC', 2020), 2)
+        self.assertEqual(round_needed('WC', 2021), 1)
+        self.assertEqual(round_needed('WC', 2022), 2)
+        self.assertEqual(round_needed('DS', 2024), 3)
+        self.assertEqual(round_needed('LCS', 2024), 4)
+        self.assertEqual(round_needed('WS', 2024), 4)
+        self.assertEqual(round_format_label('WC', 2019), 'BO1')
+        self.assertEqual(round_format_label('WC', 2024), 'BO3')
+        self.assertEqual(round_format_label('DS', 2024), 'BO5')
+        self.assertEqual(round_format_label('WS', 2024), 'BO7')
+
+    def test_players_register_populated_and_valid(self):
+        root = Path(__file__).resolve().parent.parent
+        players_path = root / 'data' / 'players.json'
+        self.assertTrue(players_path.exists())
+        players = json.loads(players_path.read_text())
+        self.assertGreater(len(players), 4000)
+        p0 = players[0]
+        for key in ('player_id', 'name', 'mlb_id'):
+            self.assertIn(key, p0)
+            self.assertTrue(p0[key])
+
+    def test_experiments_models_a_through_e_present(self):
+        root = Path(__file__).resolve().parent.parent
+        exps = json.loads((root / 'data' / 'research_experiments.json').read_text())
+        exp_ids = {x.get('id') for x in exps}
+        for model_id in ('EXP_A', 'EXP_B', 'EXP_C', 'EXP_D', 'EXP_E'):
+            self.assertIn(model_id, exp_ids)
+            item = next(x for x in exps if x.get('id') == model_id)
+            self.assertIn('brier', item)
+            self.assertIn('log_loss', item)
+            self.assertGreater(item.get('sample_size', 0), 0)
+
+    def test_no_unverified_pnl_in_ledger_file(self):
+        root = Path(__file__).resolve().parent.parent
+        ledger = json.loads((root / 'data' / 'bets_ledger.json').read_text())
+        for row in ledger:
+            if row.get('verification_status') != 'VERIFIED_PRICE':
+                self.assertTrue(row.get('pnl') is None or row.get('pnl') == 0)
+
+
 if __name__ == '__main__':
     unittest.main()

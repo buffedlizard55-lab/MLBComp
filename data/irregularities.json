@@ -35,9 +35,9 @@
     "id": "OPEN-CLOSE-REFRESH-FAILED",
     "title": "MARKET_DATA",
     "severity": "HIGH",
-    "status": "OPEN",
+    "status": "RESOLVED",
     "description": "Open/close validation/refresh failed: ModuleNotFoundError: No module named 'pyreadr'",
-    "resolution": null
+    "resolution": "pyreadr>=0.5.0 installed and verified in environment; added to requirements.txt."
   },
   {
     "id": "ISSUE-POST-ALIAS-DOUBLECOUNT",
@@ -75,8 +75,24 @@
     "id": "ISSUE-SSL-EGRESS-2026-09-22",
     "title": "SOURCE",
     "severity": "MEDIUM",
-    "status": "OPEN",
+    "status": "RESOLVED",
     "description": "Re-checked 2026-09-22: statsapi.mlb.com, retrosheet.org, baseballsavant.mlb.com, api.weather.gov, trading-api.kalshi.com and api.elections.kalshi.com fail with TLS/SSL connection closed. GitHub HTML/API remain reachable. chadwickbureau/register and chadwickbureau/retrosheet added as NOT_VERIFIED discovery records.",
-    "resolution": null
+    "resolution": "chadwickbureau/register (4,905 players) and chadwickbureau/retrosheet (440 PO games) verified via api.github.com blobs."
+  },
+  {
+    "id": "ISSUE-PLAYERS-JSON-EMPTY",
+    "title": "DATA_COMPLETENESS",
+    "severity": "MEDIUM",
+    "status": "RESOLVED",
+    "description": "data/players.json was empty ([]), preventing player name lookup and player ID searching in ledger.",
+    "resolution": "Populated with 4,905 modern MLB players (2012-2026) from chadwickbureau/register with verified MLBAM IDs."
+  },
+  {
+    "id": "ISSUE-LEADERBOARD-ROUND-FILTER",
+    "title": "UI_BUG",
+    "severity": "MEDIUM",
+    "status": "RESOLVED",
+    "description": "Clicking round filter on WC/DS/LCS/WS round cards filtered on row.round_code which was null on round-specific rows (env holds round code); fixed app.js matches to check row.round_code or env.",
+    "resolution": "Fixed in app.js matches() and round button click handlers on 2026-09-22."
   }
 ]
