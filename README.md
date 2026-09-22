@@ -107,7 +107,10 @@ python test/engine.test.py
 node test/ui.test.js
 ```
 
-The tests cover the static data contract, ledger hash chain, quote gate,
+GitHub Actions runs both suites and checks JavaScript syntax on pushes and pull
+requests. The tests cover the static data contract, ledger hash chain, quote
+provenance and selection gates, timezone-aware decision cutoffs, finite risk
+limits, fair-odds round trips, settlement outcomes and duplicate rejection,
 no-unverified-PnL rule, strategy catalog, and round/environment isolation. The
 safe `NO_SOURCE_SNAPSHOT` export is a valid test state.
 
@@ -123,3 +126,20 @@ safe `NO_SOURCE_SNAPSHOT` export is a valid test state.
   joins, timestamped historical quotes, starter/lineup availability records,
   bullpen workload features, and walk-forward forward-testing. Small samples
   remain insufficient for an edge verdict.
+
+## Paper API validation
+
+`record_prediction` requires a timezone-aware ISO-8601 decision timestamp and
+rejects a supplied data cutoff later than the decision. `record_wager` additionally
+requires verified prediction availability, a source ID and URL/API locator,
+a matching quote selection, a catalog market, finite positive bankroll/stake,
+and quote observation ≤ availability ≤ decision. UTC offsets are normalized for
+comparison. Paper execution time is the decision time, not the earlier quote
+observation time. Invalid input is rejected before wager/position writes.
+
+These are input-contract checks, not independent verification of a source's
+contents or proof of executable liquidity. Existing historical exports are not
+rewritten by these API changes. In particular, previously exported required-price
+values must be regenerated from their source snapshot to incorporate the corrected
+probability-to-American-odds conversion; this checkout has no raw source snapshot
+with which to do that reproducibly.

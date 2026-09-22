@@ -118,7 +118,7 @@ def prob_to_am(probability: float) -> float:
     p = float(probability)
     if not 0 < p < 1:
         raise ValueError("probability must be strictly between zero and one")
-    return round(100.0 * p / (1.0 - p), 1) if p <= 0.5 else round(-100.0 * (1.0 - p) / p, 1)
+    return round(100.0 * (1.0 - p) / p, 1) if p <= 0.5 else round(-100.0 * p / (1.0 - p), 1)
 
 
 def devig_two(home_probability: float, away_probability: float) -> tuple[float, float]:

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db
-from ..config import MAX_STAKE_PCT, KELLY_FRACTION, american_to_decimal, am_to_prob, prob_to_am
+from ..config import MAX_STAKE_PCT, KELLY_FRACTION, MARKETS, american_to_decimal, am_to_prob
 
 
 @dataclass(frozen=True)
@@ -67,10 +67,19 @@ def _finite(value: Any) -> bool:
 def kelly_stake(bankroll: float, probability: float, american_odds: float,
                 fraction: float = KELLY_FRACTION, cap: float = MAX_STAKE_PCT) -> float:
     """Return a capped Kelly stake, never a negative or NaN stake."""
-    if not (_finite(bankroll) and bankroll > 0 and 0 < probability < 1):
+    try:
+        bankroll, probability, american_odds, fraction, cap = map(
+            float, (bankroll, probability, american_odds, fraction, cap))
+    except (TypeError, ValueError):
+        return 0.0
+    if not (all(map(math.isfinite, (bankroll, probability, american_odds, fraction, cap)))
+            and bankroll > 0 and 0 < probability < 1 and american_odds != 0
+            and 0 <= fraction <= 1 and 0 <= cap <= 1):
         return 0.0
     decimal = american_to_decimal(american_odds)
     b = decimal - 1.0
+    if not math.isfinite(b) or b <= 0:
+        return 0.0
     raw = (b * probability - (1.0 - probability)) / b
     return round(bankroll * min(max(raw, 0.0) * fraction, cap), 2)
 
@@ -121,10 +130,30 @@ def _append_event(conn, event_type: str, fields: dict[str, Any],
     return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
+def _timestamp(value: str | None, label: str) -> datetime:
+    """Require an explicit timezone; never interpret local time as UTC."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.utcoffset() is None:
+        raise ValueError(f"{label} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_prediction(prediction: Prediction) -> datetime:
+    if not _finite(prediction.model_probability) or not 0 < prediction.model_probability < 1:
+        raise ValueError("model probability must be between zero and one")
+    decision = _timestamp(prediction.decision_time, "decision time")
+    if prediction.data_cutoff_time is not None:
+        if _timestamp(prediction.data_cutoff_time, "data cutoff") > decision:
+            raise ValueError("data cutoff was after the prediction decision time")
+    return decision
+
+
 def record_prediction(prediction: Prediction) -> None:
     """Persist a point-in-time prediction, whether or not it becomes a wager."""
-    if not 0 < prediction.model_probability < 1:
-        raise ValueError("model probability must be between zero and one")
+    _validate_prediction(prediction)
     db.init_db()
     with db.db() as conn:
         conn.execute(
@@ -151,22 +180,28 @@ def record_wager(prediction: Prediction, quote: ObservedQuote, bankroll: float,
     This is a simulation API: it never calls a bookmaker, exchange, Kalshi or
     any other order endpoint.
     """
+    decision_ts = _validate_prediction(prediction)
+    if prediction.availability_status != "VERIFIED":
+        raise ValueError("wager requires verified prediction availability")
+    if not _finite(bankroll) or float(bankroll) <= 0:
+        raise ValueError("bankroll must be positive and finite")
+    bankroll = float(bankroll)
     if quote.verification_status != "VERIFIED":
         raise ValueError("unverified quote cannot create a wager")
+    if not quote.source_id or not quote.source_id.strip() or not quote.source_url or not quote.source_url.strip():
+        raise ValueError("wager requires a source ID and URL/API locator")
+    if not quote.selection or quote.selection != prediction.selection:
+        raise ValueError("quote selection must match the prediction")
+    if quote.market_type not in MARKETS:
+        raise ValueError("unknown market type")
     if not _finite(quote.price_american) or quote.price_american == 0:
         raise ValueError("wager requires a non-zero observed American price")
-    if not prediction.decision_time or not quote.observed_at or not quote.available_at:
-        raise ValueError("decision, observed and availability timestamps are required")
-    try:
-        decision_ts = datetime.fromisoformat(prediction.decision_time.replace("Z", "+00:00"))
-        quote_ts = datetime.fromisoformat(quote.observed_at.replace("Z", "+00:00"))
-        available_ts = datetime.fromisoformat(quote.available_at.replace("Z", "+00:00"))
-        if quote_ts > decision_ts or available_ts > decision_ts:
-            raise ValueError("quote observation/availability was after the prediction decision time")
-    except ValueError:
-        raise
-    except (TypeError, AttributeError):
-        raise ValueError("decision and quote timestamps must be ISO-8601")
+    quote_ts = _timestamp(quote.observed_at, "quote observation")
+    available_ts = _timestamp(quote.available_at, "quote availability")
+    if quote_ts > decision_ts or available_ts > decision_ts:
+        raise ValueError("quote observation/availability was after the prediction decision time")
+    if available_ts < quote_ts:
+        raise ValueError("quote availability cannot precede observation")
     if stake is None:
         stake = kelly_stake(bankroll, prediction.model_probability, quote.price_american)
     if not _finite(stake) or stake <= 0:
@@ -225,7 +260,7 @@ def record_wager(prediction: Prediction, quote: ObservedQuote, bankroll: float,
             "INSERT INTO executions (execution_id,bet_id,executed_at,requested_price,fill_price,"
             "requested_size,filled_size,bid,ask,liquidity,slippage,partial_fill,verification_status) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"execution:{bet_id_new}", bet_id_new, quote.observed_at, quote.price_american,
+            (f"execution:{bet_id_new}", bet_id_new, prediction.decision_time, quote.price_american,
              quote.price_american, stake, stake, quote.bid, quote.ask, quote.liquidity,
              0.0, 0, "VERIFIED"),
         )
