@@ -1106,6 +1106,33 @@
     "env_label": "POST"
   },
   {
+    "sid": "MLB_POST_DEDICATED_001",
+    "name": "Dedicated postseason Elo",
+    "env": "POST",
+    "model": "post_elo",
+    "market": "ML",
+    "hypothesis": "A postseason-only Elo tracker inherits the regular-season rating as a prior and then updates only on earlier postseason games.",
+    "data_requirements": [
+      "regular_model",
+      "postseason.games"
+    ],
+    "entry_rule": "Only evaluate when every required input is available before the decision timestamp.",
+    "required_price_rule": "Require an observed, timestamped quote at or before the decision timestamp; otherwise EVAL/PROPOSED, never a wager.",
+    "sizing_rule": "Quarter Kelly on the observed price, capped at 5% of strategy bankroll; no stake without a price.",
+    "settlement_rule": "Use the market's documented settlement rule and an independently observed result; W/L/P/V only.",
+    "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
+    "limitations": "No causal claim; small samples remain inconclusive.",
+    "min_edge": 0.02,
+    "notes": "Catalogued 2026-09-22. Not backtested in the current SOURCE_SNAPSHOT; no PnL is asserted.",
+    "version": "v1",
+    "parent_version": null,
+    "status": "NOT_RUN",
+    "extra": {},
+    "id": "MLB_POST_DEDICATED_001",
+    "strategy_id": "MLB_POST_DEDICATED_001",
+    "env_label": "POST"
+  },
+  {
     "sid": "MLB_POST_HIERARCHICAL_001",
     "name": "Hierarchical REG plus PO",
     "env": "POST",
@@ -1737,11 +1764,14 @@
     "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
     "limitations": "No causal claim; small samples remain inconclusive.",
     "min_edge": 0.02,
-    "notes": "",
+    "notes": "ALIAS_OF=MLB_POST_XREG_001; excluded from unique environment totals.",
     "version": "v1",
     "parent_version": null,
     "status": "BACKTESTED",
-    "extra": {},
+    "extra": {
+      "alias_of": "MLB_POST_XREG_001",
+      "experiment": "A"
+    },
     "id": "MLB_POST_MODEL_A_001",
     "strategy_id": "MLB_POST_MODEL_A_001",
     "env_label": "POST"
@@ -1764,11 +1794,14 @@
     "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
     "limitations": "No causal claim; small samples remain inconclusive.",
     "min_edge": 0.02,
-    "notes": "",
+    "notes": "ALIAS_OF=MLB_POST_ADJUSTED_001; excluded from unique environment totals.",
     "version": "v1",
     "parent_version": null,
     "status": "BACKTESTED",
-    "extra": {},
+    "extra": {
+      "alias_of": "MLB_POST_ADJUSTED_001",
+      "experiment": "B"
+    },
     "id": "MLB_POST_MODEL_B_001",
     "strategy_id": "MLB_POST_MODEL_B_001",
     "env_label": "POST"
@@ -1777,9 +1810,9 @@
     "sid": "MLB_POST_MODEL_C_001",
     "name": "Model C dedicated",
     "env": "POST",
-    "model": "hierarchical",
+    "model": "post_elo",
     "market": "ML",
-    "hypothesis": "Permanent comparison experiment C; not declared superior in advance.",
+    "hypothesis": "Permanent comparison experiment C (alias of MLB_POST_DEDICATED_001); this snapshot's leaderboard row still reflects the previous hierarchical binding and is flagged in the issue queue. Future runs use post_elo.",
     "data_requirements": [
       "postseason.games",
       "regular_model"
@@ -1791,11 +1824,14 @@
     "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
     "limitations": "No causal claim; small samples remain inconclusive.",
     "min_edge": 0.02,
-    "notes": "",
+    "notes": "ALIAS_OF=MLB_POST_DEDICATED_001; excluded from unique environment totals.",
     "version": "v1",
     "parent_version": null,
     "status": "BACKTESTED",
-    "extra": {},
+    "extra": {
+      "alias_of": "MLB_POST_DEDICATED_001",
+      "experiment": "C"
+    },
     "id": "MLB_POST_MODEL_C_001",
     "strategy_id": "MLB_POST_MODEL_C_001",
     "env_label": "POST"
@@ -1818,11 +1854,14 @@
     "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
     "limitations": "No causal claim; small samples remain inconclusive.",
     "min_edge": 0.02,
-    "notes": "",
+    "notes": "ALIAS_OF=MLB_POST_ADJUSTED_001; excluded from unique environment totals.",
     "version": "v1",
     "parent_version": null,
     "status": "BACKTESTED",
-    "extra": {},
+    "extra": {
+      "alias_of": "MLB_POST_ADJUSTED_001",
+      "experiment": "D"
+    },
     "id": "MLB_POST_MODEL_D_001",
     "strategy_id": "MLB_POST_MODEL_D_001",
     "env_label": "POST"
@@ -1845,11 +1884,14 @@
     "test_plan": "Chronological train/validate/out-of-sample test, then forward test and paper trade.",
     "limitations": "No causal claim; small samples remain inconclusive.",
     "min_edge": 0.02,
-    "notes": "",
+    "notes": "ALIAS_OF=MLB_POST_HIERARCHICAL_001; excluded from unique environment totals.",
     "version": "v1",
     "parent_version": null,
     "status": "BACKTESTED",
-    "extra": {},
+    "extra": {
+      "alias_of": "MLB_POST_HIERARCHICAL_001",
+      "experiment": "E"
+    },
     "id": "MLB_POST_MODEL_E_001",
     "strategy_id": "MLB_POST_MODEL_E_001",
     "env_label": "POST"

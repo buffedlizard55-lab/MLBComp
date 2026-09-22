@@ -111,6 +111,18 @@ def model_xreg(g, f, ctx) -> float:
     return model_elo(g, f, ctx)
 
 
+def model_post_elo(g, f, ctx) -> float:
+    """Dedicated postseason Elo: REG rating is the prior, then only earlier PO games update it.
+
+    Distinct from transfer (xreg) which never updates on postseason results, and
+    from hierarchical pooling which mixes late-form and series state.
+    """
+    p = f.get("p_post_elo", float("nan"))
+    if not _num(p):
+        p = f.get("p_elo", float("nan"))
+    return float(p) if _num(p) else float("nan")
+
+
 def model_market(g, f, ctx) -> float:
     # A historical price without a verified availability timestamp is not an
     # eligible model feature; using it would leak closing information.
@@ -220,8 +232,8 @@ MODELS: dict[str, Callable] = {
     "elo": model_elo, "form": model_form, "season": model_season,
     "lateform": model_lateform, "poisson_total": model_poisson_total,
     "hierarchical": model_hierarchical, "round_specific": model_round_specific,
-    "xreg": model_xreg, "market": model_market, "bullpen": model_bullpen,
-    "rest": model_rest, "market_move": model_market_move,
+    "xreg": model_xreg, "post_elo": model_post_elo, "market": model_market,
+    "bullpen": model_bullpen, "rest": model_rest, "market_move": model_market_move,
 }
 
 
@@ -423,6 +435,9 @@ def build_catalog() -> list[Strategy]:
            "A postseason intercept learned only from prior postseason seasons improves transfer.", ("regular_model", "postseason.games")),
         _s("MLB_POST_HIERARCHICAL_001", "Hierarchical REG plus PO", "POST", "hierarchical", "ML",
            "Career/multi-year, current season, late season, prior postseason and current series evidence are partially pooled.", ("regular_model", "postseason.games", "series_state")),
+        _s("MLB_POST_DEDICATED_001", "Dedicated postseason Elo", "POST", "post_elo", "ML",
+           "A postseason-only Elo tracker inherits the regular-season rating as a prior and then updates only on earlier postseason games.",
+           ("regular_model", "postseason.games")),
         _s("MLB_POST_SERIESSTATE_001", "Series-state model", "POST", "hierarchical", "ML",
            "Game number, record, elimination, clinching and games remaining add measurable information only if they do.", ("series_state", "postseason.games"), min_edge=0.03),
         _s("MLB_POST_PITCHING_001", "Postseason pitching leash", "POST", "hierarchical", "ML",
@@ -454,16 +469,21 @@ def build_catalog() -> list[Strategy]:
                f"{label} market efficiency is measured from observed verified prices, never inferred from outcomes.",
                ("postseason.markets",)),
         ])
-    # Explicitly expose the framework's five permanent experiments as catalog
-    # rows so they can never be accidentally replaced by a single PO model.
-    for exp_id, name, model in (("A", "Model A transfer", "xreg"),
-                                ("B", "Model B adjusted", "round_specific"),
-                                ("C", "Model C dedicated", "hierarchical"),
-                                ("D", "Model D round-specific", "round_specific"),
-                                ("E", "Model E hierarchical", "hierarchical")):
+    # Experiment aliases are catalog labels for the permanent A–E comparison.
+    # They must bind to the SAME model function as the named strategy they
+    # represent.  They are excluded from environment PnL roll-ups so they
+    # cannot double-count the underlying strategy.
+    for exp_id, name, model, parent in (
+            ("A", "Model A transfer", "xreg", "MLB_POST_XREG_001"),
+            ("B", "Model B adjusted", "round_specific", "MLB_POST_ADJUSTED_001"),
+            ("C", "Model C dedicated", "post_elo", "MLB_POST_DEDICATED_001"),
+            ("D", "Model D round-specific", "round_specific", "MLB_POST_ADJUSTED_001"),
+            ("E", "Model E hierarchical", "hierarchical", "MLB_POST_HIERARCHICAL_001")):
         post.append(_s(f"MLB_POST_MODEL_{exp_id}_001", name, "POST", model, "ML",
-                       f"Permanent comparison experiment {exp_id}; not declared superior in advance.",
-                       ("postseason.games", "regular_model")))
+                       f"Permanent comparison experiment {exp_id} (alias of {parent}); not declared superior in advance.",
+                       ("postseason.games", "regular_model"),
+                       notes=f"ALIAS_OF={parent}; excluded from unique environment totals.",
+                       extra={"alias_of": parent, "experiment": exp_id}))
     return reg + post
 
 

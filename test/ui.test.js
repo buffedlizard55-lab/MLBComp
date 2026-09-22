@@ -5,10 +5,22 @@ const assert = require('assert');
 const root = path.join(__dirname, '..', 'data');
 const read = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
 
+const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+assert.ok(html.includes('id="analytics-detail"'), 'Analytics tab requires #analytics-detail');
+assert.ok(html.includes('id="history-pager"'));
+assert.ok(html.includes('leader-alias'));
+assert.ok(html.includes('history-game'));
+assert.ok(html.includes('history-player'));
+
 const summary = read('summary.json');
 assert.ok(['NO_SOURCE_SNAPSHOT', 'SOURCE_SNAPSHOT'].includes(summary.data_mode));
 assert.ok(summary.total_strategies >= 50, 'strategy research library is present');
 assert.ok(!('total_simulated_pnl' in summary) || summary.total_simulated_pnl === null || typeof summary.total_simulated_pnl === 'number');
+if (summary.data_mode === 'SOURCE_SNAPSHOT') {
+  assert.ok(summary.unique_environment_breakdown, 'unique environment totals must be published');
+  assert.ok(summary.unique_environment_breakdown.POST.verified_bets <= summary.environment_breakdown.POST.verified_bets);
+  assert.ok(typeof summary.unique_verified_pnl === 'number');
+}
 
 const strategies = read('strategies.json');
 assert.ok(strategies.length >= 50);

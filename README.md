@@ -41,10 +41,17 @@ order-placement client in this repository.
 
 ## Truthful data policy
 
-The repository does **not** create a source snapshot on its own. On a checkout
-where `data/raw/` and `data/features/` are absent, the published site says
-`NO_SOURCE_SNAPSHOT`: it shows the catalog and controls, but no game, lineup,
-price, fill, result, odds, liquidity, PnL or performance is asserted.
+This checkout currently publishes a `SOURCE_SNAPSHOT` JSON projection. On a
+checkout where `data/raw/` and `data/features/` are absent, `python -m
+mlbcomp.web.export_static` **refuses** to overwrite that snapshot unless
+`--force` is passed, so a catalog-only rebuild cannot silently erase verified
+numbers. With `--force`, the site says `NO_SOURCE_SNAPSHOT`: it shows the
+catalog and controls, but no game, lineup, price, fill, result, odds,
+liquidity, PnL or performance is asserted.
+
+`MLB_POST_MODEL_A`–`E` are experiment aliases of catalog strategies. Dashboard
+totals use `unique_environment_breakdown` / `unique_verified_pnl` so POST PnL
+is not double-counted. Raw `environment_breakdown` is retained for audit.
 
 A historical quote is eligible for a wager only when it has:
 
@@ -116,9 +123,9 @@ safe `NO_SOURCE_SNAPSHOT` export is a valid test state.
 
 ## Known limitations and next priorities
 
-- This checkout currently has no fetched source snapshot, so no performance
-  result is reported. Run the fetch/ingest/validation pipeline before making a
-  historical claim.
+- The committed JSON is a SOURCE_SNAPSHOT from 2026-09-21. `data/raw/` and
+  `data/features/` are gitignored, so this sandbox cannot re-run ingest/backtest.
+  Do not treat a missing parquet tree as a reason to wipe the published numbers.
 - Source coverage, historical quote timestamps, lineups, injuries, weather,
   umpire assignments, player props, live markets and Kalshi order-book history
   are source-dependent and remain `NOT_VERIFIED` until explicitly observed.

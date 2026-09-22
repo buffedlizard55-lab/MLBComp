@@ -10,7 +10,7 @@
   "completed_games": 27972,
   "upcoming_games": 91,
   "incomplete_historical_games": 9,
-  "total_strategies": 69,
+  "total_strategies": 70,
   "total_simulated_bets": 154688,
   "settled_bets": 33143,
   "total_simulated_pnl": -96903.05,
@@ -88,5 +88,65 @@
     "Historical odds without an observed decision-time timestamp are not eligible for paper PnL; evaluation uses scores for Brier/log-loss only.",
     "Postseason has distinct REG/POST/WC/DS/LCS/WS models and leaderboards; a small sample does not establish an edge.",
     "No real-money order connector exists; all positions are paper-only."
-  ]
+  ],
+  "unique_verified_pnl": -89575.37,
+  "unique_environment_breakdown": {
+    "REG": {
+      "strategies": 39,
+      "records": 150346,
+      "settled": 31851,
+      "evaluation_picks": 92627,
+      "verified_bets": 31851,
+      "verified_pnl": -78399.8,
+      "status": "EVALUATED"
+    },
+    "POST": {
+      "strategies": 10,
+      "records": 1617,
+      "settled": 485,
+      "evaluation_picks": 1132,
+      "verified_bets": 485,
+      "verified_pnl": -7024.96,
+      "status": "EVALUATED"
+    },
+    "WC": {
+      "strategies": 4,
+      "records": 165,
+      "settled": 18,
+      "evaluation_picks": 147,
+      "verified_bets": 18,
+      "verified_pnl": -3537.48,
+      "status": "EVALUATED"
+    },
+    "DS": {
+      "strategies": 4,
+      "records": 343,
+      "settled": 117,
+      "evaluation_picks": 226,
+      "verified_bets": 117,
+      "verified_pnl": 3065.35,
+      "status": "EVALUATED"
+    },
+    "LCS": {
+      "strategies": 4,
+      "records": 233,
+      "settled": 77,
+      "evaluation_picks": 156,
+      "verified_bets": 77,
+      "verified_pnl": -4420.41,
+      "status": "EVALUATED"
+    },
+    "WS": {
+      "strategies": 4,
+      "records": 128,
+      "settled": 49,
+      "evaluation_picks": 79,
+      "verified_bets": 49,
+      "verified_pnl": 741.93,
+      "status": "EVALUATED"
+    }
+  },
+  "alias_note": "MLB_POST_MODEL_A\u2013E are experiment aliases of catalog strategies. environment_breakdown includes them; unique_environment_breakdown and unique_verified_pnl exclude them so POST PnL is not double-counted.",
+  "audit_pass": "2026-09-22 adversarial audit: analytics-detail crash, Q15\u2013Q18 wiring, alias double-count, export wipe guard.",
+  "report_date": "2026-09-22"
 }

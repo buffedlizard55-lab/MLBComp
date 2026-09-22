@@ -349,6 +349,54 @@ def build_research() -> dict[str, Any]:
                 else:
                     findings.append(_finding(qid, "ALL", "DATA_UNAVAILABLE", 0, {},
                         "odds.parquet absent.", provenance))
+            elif qid == "Q06":
+                findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {},
+                    "Lineup construction and platoon usage require confirmed batting-order "
+                    "rows with announced_at/available_at. No such source is verified in this "
+                    "checkout; the question is flagged rather than inferred from box scores.",
+                    provenance))
+            elif qid == "Q07":
+                findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {},
+                    "Managerial substitutions, pinch hitting and defensive changes require "
+                    "timestamped play-by-play roles plus a pre-game availability gate. Those "
+                    "fields are not verified here.",
+                    provenance))
+            elif qid == "Q08":
+                findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {},
+                    "Pitch mix and velocity require pitch-level Statcast with an availability "
+                    "time at or before first pitch. Baseball Savant is not reachable from this "
+                    "environment and is not a production dependency.",
+                    provenance))
+            elif qid in {"Q15", "Q16", "Q17", "Q18"}:
+                # Permanent A–E comparison. Metrics come from the bets table
+                # when a snapshot exists; otherwise DATA_UNAVAILABLE.
+                ae = {
+                    "A": _experiment_metrics("MLB_POST_XREG_001", "POST"),
+                    "B": _experiment_metrics("MLB_POST_ADJUSTED_001", "POST"),
+                    "C": _experiment_metrics("MLB_POST_SERIESSTATE_001", "POST"),
+                    "D": _experiment_metrics_many([f"MLB_POST_{r}_ELO_001" for r in ("WC", "DS", "LCS", "WS")]),
+                    "E": _experiment_metrics("MLB_POST_HIERARCHICAL_001", "POST"),
+                }
+                if qid == "Q15":
+                    left, right, label = ae["A"], ae["B"], "transfer vs adjusted"
+                elif qid == "Q16":
+                    left, right, label = ae["A"], ae["C"], "transfer vs dedicated series-state"
+                elif qid == "Q17":
+                    left, right, label = ae["A"], ae["D"], "all-post transfer vs round-specific Elo"
+                else:
+                    left, right, label = ae["A"], ae["E"], "transfer vs hierarchical pooling"
+                n_a, n_b = int(left.get("n") or 0), int(right.get("n") or 0)
+                brier_a, brier_b = left.get("brier"), right.get("brier")
+                delta = (float(brier_b) - float(brier_a)
+                         if brier_a is not None and brier_b is not None else None)
+                verdict = ("DATA_UNAVAILABLE" if min(n_a, n_b) == 0
+                           else _comparison_verdict(delta, n_a, n_b))
+                findings.append(_finding(qid, "POST", verdict, max(n_a, n_b),
+                    {"comparison": label, "left": left, "right": right, "delta_brier": delta,
+                     "rule": "Lower Brier is better; no model is promoted from a small sample."},
+                    f"{label}: Brier delta (right-left)={delta}. Permanent experiment; "
+                    "no superiority is declared.",
+                    "bets table; Models A–E; verified PnL only where a quote exists."))
             elif qid == "Q19":
                 # A market family is available only if quotes carry an explicit
                 # verified status; the absence is an observed data result.
@@ -358,6 +406,17 @@ def build_research() -> dict[str, Any]:
                     {"verified_quote_rows": n},
                     "Historical market coverage is counted from verified quote records only.",
                     "market_quotes.source_observation_id; no quote is inferred."))
+            elif qid == "Q20":
+                versions = db.query_df("SELECT strategy_id, version_label, parent_version FROM strategy_versions")
+                n = int(len(versions)) if versions is not None else 0
+                parents = int(versions.parent_version.notna().sum()) if n and "parent_version" in versions else 0
+                findings.append(_finding(qid, "ALL", "EVALUATED" if n else "NOT_RUN", n,
+                    {"strategy_versions": n, "versions_with_parent": parents,
+                     "note": "A later version is compared only on a future window; v1-only catalogs have nothing to promote."},
+                    "Every catalog entry is versioned. No subsequent modification has a "
+                    "registered parent comparison in this snapshot, so no model change is "
+                    "declared an improvement.",
+                    "strategy_versions table"))
             else:
                 findings.append(_finding(qid, "POST" if qid not in {"Q19", "Q20"} else "ALL",
                     "NOT_RUN", 0, {},
@@ -374,6 +433,9 @@ def build_research() -> dict[str, Any]:
         # Keep experiments deterministic: replace previous A–E on each run
         conn.execute("DELETE FROM experiments WHERE exp_id LIKE 'EXP_%'")
         experiments = []
+        # EXP_C remains the series-state model that was actually evaluated in
+        # this snapshot.  MLB_POST_DEDICATED_001 (postseason Elo) is catalogued
+        # separately and stays NOT_RUN until a new backtest lands.
         pairs = [("A", "MLB_POST_XREG_001", "Model A — regular-season transfer"),
                  ("B", "MLB_POST_ADJUSTED_001", "Model B — regular season plus postseason adjustment"),
                  ("C", "MLB_POST_SERIESSTATE_001", "Model C — dedicated postseason/series state"),
