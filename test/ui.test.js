@@ -37,8 +37,14 @@ for (const row of leaderboard) {
 }
 
 const checks = read('audit_checks.json');
-assert.strictEqual(checks.length, 18);
-assert.ok(checks.every(c => c.passed === true));
+assert.ok(checks.length >= 18, `expected the adversarial control suite, got ${checks.length}`);
+assert.ok(checks.every(c => c.passed === true), 'every control must pass');
+const checkNames = new Set(checks.map(c => c.name));
+for (const required of ['settlement_matches_scores', 'quote_observations_verified',
+  'clv_in_range', 'series_needed_format', 'ledger_hash_chain', 'no_unverified_pnl',
+  'postseason_round_codes', 'series_state_pre_game']) {
+  assert.ok(checkNames.has(required), `missing control: ${required}`);
+}
 const ledger = read('bets_ledger.json');
 for (const row of ledger) {
   if (row.verification_status !== 'VERIFIED_PRICE') assert.ok(!row.pnl || row.pnl === 0);

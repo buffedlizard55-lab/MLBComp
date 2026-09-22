@@ -154,9 +154,16 @@ def build_research() -> dict[str, Any]:
                 a = (post.home_score > post.away_score).astype(int).to_numpy()
                 b = (reg.home_score > reg.away_score).astype(int).to_numpy()
                 delta = float(a.mean() - b.mean()) if len(a) and len(b) else None
+                by_round = {}
+                for rnd in ("WC", "DS", "LCS", "WS"):
+                    sub = post[post.round_code == rnd]
+                    if len(sub):
+                        by_round[rnd] = {"n": int(len(sub)),
+                                         "home_win_rate": _safe((sub.home_score > sub.away_score).mean())}
                 findings.append(_finding(qid, "POST", _comparison_verdict(delta, len(a), len(b)), len(a),
                     {"post_home_win_rate": _safe(a.mean()) if len(a) else None,
-                     "reg_home_win_rate": _safe(b.mean()) if len(b) else None, "delta": delta},
+                     "reg_home_win_rate": _safe(b.mean()) if len(b) else None, "delta": delta,
+                     "by_round": by_round},
                     "Home-win frequency is descriptive; no causal postseason assumption is made.", provenance))
             elif qid == "Q09":
                 # Late-season form: compare lateform vs elo Brier if available
@@ -219,6 +226,127 @@ def build_research() -> dict[str, Any]:
                         findings.append(_finding(qid, "POST", "INSUFFICIENT_SAMPLE", len(merged), {"post_n": len(merged)}, "Insufficient postseason games with rest data.", provenance))
                 else:
                     findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {}, "Rest/travel columns not available.", provenance))
+            elif qid == "Q04":
+                pg_path = FEAT / "pitcher_game.parquet"
+                if pg_path.exists() and len(completed):
+                    pg = pd.read_parquet(pg_path)
+                    starter = pg[pg.is_starter == 1].merge(
+                        completed[["game_pk", "round_code"]], on="game_pk", how="inner")
+                    starter = starter[starter.batters_faced > 0]
+                    reg_sp = starter[starter.round_code.isna()].batters_faced.astype(float)
+                    post_sp = starter[starter.round_code.notna()].batters_faced.astype(float)
+                    delta = float(post_sp.mean() - reg_sp.mean()) if len(reg_sp) and len(post_sp) else None
+                    verdict = _comparison_verdict(delta, len(reg_sp), len(post_sp)) if delta is not None else "DATA_UNAVAILABLE"
+                    findings.append(_finding(qid, "POST", verdict, int(len(post_sp)),
+                        {"reg_starter_bf_mean": _safe(reg_sp.mean()) if len(reg_sp) else None,
+                         "reg_starter_bf_std": _safe(reg_sp.std(ddof=1)) if len(reg_sp) > 1 else None,
+                         "post_starter_bf_mean": _safe(post_sp.mean()) if len(post_sp) else None,
+                         "post_starter_bf_std": _safe(post_sp.std(ddof=1)) if len(post_sp) > 1 else None,
+                         "delta_batters_faced": delta, "reg_n": int(len(reg_sp)), "post_n": int(len(post_sp))},
+                        "Starter leash measured as batters faced by the first pitcher of the game "
+                        "(play-by-play derived) in REG vs POST; descriptive, not causal.", provenance))
+                else:
+                    findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {},
+                        "pitcher_game table absent; starter leash cannot be measured.", provenance))
+            elif qid == "Q05":
+                ge_path = FEAT / "game_events.parquet"
+                tp_path = FEAT / "team_pitching_game.parquet"
+                if ge_path.exists() and len(completed):
+                    ge = pd.read_parquet(ge_path).merge(
+                        completed[["game_pk", "round_code"]], on="game_pk", how="inner")
+                    reg_g = ge[ge.round_code.isna()].pitchers_used.astype(float)
+                    post_g = ge[ge.round_code.notna()].pitchers_used.astype(float)
+                    delta = float(post_g.mean() - reg_g.mean()) if len(reg_g) and len(post_g) else None
+                    bp_stats = {}
+                    if tp_path.exists():
+                        tp = pd.read_parquet(tp_path).merge(
+                            completed[["game_pk", "round_code"]], on="game_pk", how="inner")
+                        tp["bp_share"] = tp.bp_bf / tp.bf_total.clip(lower=1)
+                        reg_bp = tp[tp.round_code.isna()].bp_share.astype(float)
+                        post_bp = tp[tp.round_code.notna()].bp_share.astype(float)
+                        bp_stats = {"reg_bp_bf_share": _safe(reg_bp.mean()) if len(reg_bp) else None,
+                                    "post_bp_bf_share": _safe(post_bp.mean()) if len(post_bp) else None,
+                                    "delta_bp_share": (float(post_bp.mean() - reg_bp.mean())
+                                                       if len(reg_bp) and len(post_bp) else None)}
+                    verdict = _comparison_verdict(delta, len(reg_g), len(post_g)) if delta is not None else "DATA_UNAVAILABLE"
+                    findings.append(_finding(qid, "POST", verdict, int(len(post_g)),
+                        {"reg_pitchers_used_mean": _safe(reg_g.mean()) if len(reg_g) else None,
+                         "post_pitchers_used_mean": _safe(post_g.mean()) if len(post_g) else None,
+                         "delta_pitchers_used": delta, "reg_n": int(len(reg_g)), "post_n": int(len(post_g)),
+                         **bp_stats},
+                        "Bullpen usage measured by pitchers used per game and bullpen share of "
+                        "batters faced (play-by-play derived); descriptive, not causal.", provenance))
+                else:
+                    findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {},
+                        "game_events table absent; bullpen usage cannot be measured.", provenance))
+            elif qid == "Q12":
+                if not state.empty:
+                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner")
+                    merged = merged[merged.game_number.notna()]
+                    if len(merged) >= 30:
+                        merged["margin"] = merged.home_score - merged.away_score
+                        by_number = {}
+                        for gn, sub in merged.groupby(merged.game_number.astype(int)):
+                            by_number[int(gn)] = {"n": int(len(sub)),
+                                                  "home_win_rate": _safe((sub.margin > 0).mean()),
+                                                  "mean_margin": _safe(sub.margin.mean())}
+                        findings.append(_finding(qid, "POST", "EVALUATED", int(len(merged)),
+                            {"by_game_number": by_number},
+                            "Home win rate and mean margin by series game number (descriptive; "
+                            "home-field pattern confounds raw rates).", provenance))
+                    else:
+                        findings.append(_finding(qid, "POST", "INSUFFICIENT_SAMPLE", int(len(merged)),
+                            {"post_n": int(len(merged))}, "Too few postseason games for game-number split.", provenance))
+                else:
+                    findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {},
+                        "Series-state table absent.", provenance))
+            elif qid == "Q14":
+                odds_path = FEAT / "odds.parquet"
+                if odds_path.exists():
+                    o = pd.read_parquet(odds_path)
+                    o = o[o.verification_status == "VERIFIED"].copy()
+                    if len(o) >= 30 and {"home_odds_open", "home_odds_close"} <= set(o.columns):
+                        from ..config import am_to_prob, devig_two
+                        rows_mv = []
+                        for r in o.dropna(subset=["home_odds_open", "home_odds_close"]).itertuples():
+                            ho, ao = devig_two(am_to_prob(r.home_odds_open), am_to_prob(r.away_odds_open))
+                            hc, ac = devig_two(am_to_prob(r.home_odds_close), am_to_prob(r.away_odds_close))
+                            if pd.notna(ho) and pd.notna(hc):
+                                rows_mv.append({"game_pk": r.game_pk,
+                                                "move": float(hc) - float(ho),
+                                                "close_home": float(hc)})
+                        mv = pd.DataFrame(rows_mv)
+                        if len(mv):
+                            gm = mv.merge(completed[["game_pk", "round_code", "home_score", "away_score"]],
+                                          on="game_pk", how="inner")
+                            gm["home_won"] = (gm.home_score > gm.away_score).astype(int)
+                            calib = {"n": int(len(gm)),
+                                     "mean_abs_move": _safe(gm["move"].abs().mean()),
+                                     "fav_at_close_win_rate": _safe(
+                                         ((gm.close_home > 0.5).astype(int) == gm.home_won).mean()),
+                                     "brier_close": _safe(((gm.close_home - gm.home_won) ** 2).mean())}
+                            by_env = {}
+                            for name, mask in (("REG", gm.round_code.isna()),
+                                               ("POST", gm.round_code.notna())):
+                                sub = gm[mask]
+                                if len(sub):
+                                    by_env[name] = {"n": int(len(sub)),
+                                                    "mean_abs_move": _safe(sub["move"].abs().mean()),
+                                                    "brier_close": _safe(((sub.close_home - sub.home_won) ** 2).mean())}
+                            findings.append(_finding(qid, "ALL", "EVALUATED", int(len(gm)),
+                                {**calib, "by_env": by_env},
+                                "Verified open/close rows only: movement size, closing-line favorite "
+                                "hit rate and closing de-vigged Brier by environment. This measures "
+                                "market efficiency, not a strategy's edge.", provenance))
+                        else:
+                            findings.append(_finding(qid, "ALL", "DATA_UNAVAILABLE", 0, {},
+                                "No verified open/close pairs after joins.", provenance))
+                    else:
+                        findings.append(_finding(qid, "ALL", "DATA_UNAVAILABLE", 0, {},
+                            f"Verified quote rows={int(len(o))}; open/close columns required.", provenance))
+                else:
+                    findings.append(_finding(qid, "ALL", "DATA_UNAVAILABLE", 0, {},
+                        "odds.parquet absent.", provenance))
             elif qid == "Q19":
                 # A market family is available only if quotes carry an explicit
                 # verified status; the absence is an observed data result.

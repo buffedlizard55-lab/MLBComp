@@ -26,15 +26,50 @@ from .strategies import MODELS, Strategy, build_catalog, special_rules
 ROUNDS = ("WC", "DS", "LCS", "WS")
 
 
+def _update_online_coefs(g, f: dict[str, Any], ctx: dict[str, Any], is_post: bool) -> None:
+    """SGD step for the online model coefficients after a completed game.
+
+    Called only AFTER every strategy has already made its decision for this
+    game, so coefficients always reflect strictly earlier information.
+    """
+    from .strategies import _logit, _num, _online_update, _sig
+    p_elo = f.get("p_elo")
+    if not _num(p_elo):
+        return
+    home_won = int(g.home_score > g.away_score)
+    env = "POST" if is_post else "REG"
+    store = ctx.setdefault("online_coefs", {})
+    # Bullpen workload coefficient
+    bh, ba = f.get("h_bp_bf_l3"), f.get("a_bp_bf_l3")
+    if _num(bh) and _num(ba):
+        x = (float(ba) - float(bh)) / 10.0
+        w = store.setdefault(f"bp_{env}", {"w": 0.0, "n": 0})["w"]
+        p_home = _sig(_logit(float(p_elo)) + w * x)
+        _online_update(ctx, f"bp_{env}", x, p_home, home_won)
+    # Rest-differential coefficient
+    rh, ra = f.get("rest_home"), f.get("rest_away")
+    if _num(rh) and _num(ra):
+        x = max(min(float(rh) - float(ra), 4.0), -4.0)
+        w = store.setdefault(f"rest_{env}", {"w": 0.0, "n": 0})["w"]
+        p_home = _sig(_logit(float(p_elo)) + w * x)
+        _online_update(ctx, f"rest_{env}", x, p_home, home_won)
+    # Market-movement coefficient (verified open/close pairs only)
+    if f.get("market_quote_verified"):
+        from ..config import am_to_prob, devig_two
+        h_open, _ = devig_two(am_to_prob(f.get("home_odds")), am_to_prob(f.get("away_odds")))
+        h_close, _ = devig_two(am_to_prob(f.get("market_close_home_odds")),
+                               am_to_prob(f.get("market_close_away_odds")))
+        if _num(h_open) and _num(h_close):
+            x = 4.0 * (float(h_close) - float(h_open))
+            w = store.setdefault(f"mv_{env}", {"w": 0.0, "n": 0})["w"]
+            p_home = _sig(_logit(float(h_close)) + w * x)
+            _online_update(ctx, f"mv_{env}", x, p_home, home_won)
+
+
 def _need(year: int, round_code: str) -> int:
     """Wins required by the historical format, used by series-state tests."""
-    if round_code == "WC":
-        return 1 if int(year) in (2012, 2015) else 2
-    if round_code == "DS":
-        return 3
-    if round_code in {"LCS", "WS"}:
-        return 4
-    raise ValueError(f"unknown postseason round {round_code!r}")
+    from ..config import round_needed
+    return round_needed(round_code, int(year))
 
 
 def _american_to_decimal(odds: float) -> float:
@@ -136,13 +171,26 @@ def _market_quote(f: dict[str, Any], decision: dict[str, Any], g,
                   verified_source_ids: set[str] | None = None,
                   verified_observation_ids: set[str] | None = None) -> dict[str, Any] | None:
     """Return a quote only with timestamp, explicit verification and source evidence."""
+    tier = decision.get("price_tier") or "open"
     side = "home" if decision["selection"] == "HOME" else "away"
-    odds = f.get(f"{side}_odds") if decision["market"] in {"ML", "F5_ML"} else f.get("market_odds")
+    if decision["market"] in {"ML", "F5_ML"}:
+        if tier == "close":
+            odds = f.get(f"market_close_{side}_odds")
+        else:
+            odds = f.get(f"{side}_odds")
+    else:
+        # Totals/run-line rows carry a single juice column, not a two-way
+        # quote, so they never produce a wager from this gate.
+        odds = f.get("market_odds")
     verified = f.get("market_quote_verified", False)
-    observed_at = f.get("market_quote_observed_at")
+    observed_at = f.get("market_close_observed_at") if tier == "close" else f.get("market_quote_observed_at")
     available_at = f.get("market_quote_available_at")
+    if tier == "close" and verified and not observed_at:
+        observed_at = f.get("market_quote_available_at")
     source_id = f.get("market_quote_source_id")
     source_observation_id = f.get("market_quote_source_observation_id")
+    if tier == "close" and verified and source_observation_id:
+        source_observation_id = str(source_observation_id).replace(":open:", ":close:")
     if verified_observation_ids is not None and source_observation_id:
         if source_observation_id not in verified_observation_ids:
             return None
@@ -161,10 +209,13 @@ def _market_quote(f: dict[str, Any], decision: dict[str, Any], g,
         return None
     return {"american": float(odds), "observed_at": str(observed_at),
             "available_at": f.get("market_quote_available_at"),
-            "closing": bool(f.get("market_quote_closing", False)),
+            "closing": tier == "close",
+            "tier": tier,
             "source_id": f.get("market_quote_source_id"),
             "source_url": f.get("market_quote_source_url"),
-            "source_observation_id": f.get("market_quote_source_observation_id")}
+            "source_observation_id": source_observation_id,
+            "close_american": (f.get("market_close_home_odds") if decision["selection"] == "HOME"
+                               else f.get("market_close_away_odds"))}
 
 
 def _prediction_id(run_id: str, strategy: Strategy, game_pk: int) -> str:
@@ -264,7 +315,11 @@ def run_backtest(po_valid_pks: set[int] | None = None, min_season: int = 2015,
             if quote is not None:
                 from ..config import am_to_prob, devig_two
                 if strategy.market == "ML":
-                    hp, ap = am_to_prob(f.get("home_odds")), am_to_prob(f.get("away_odds"))
+                    tier = decision.get("price_tier") or "open"
+                    if tier == "close":
+                        hp, ap = am_to_prob(f.get("market_close_home_odds")), am_to_prob(f.get("market_close_away_odds"))
+                    else:
+                        hp, ap = am_to_prob(f.get("home_odds")), am_to_prob(f.get("away_odds"))
                     hp, ap = devig_two(hp, ap)
                     market_p = hp if decision["selection"] == "HOME" else ap
                     edge = selected_p - market_p if pd.notna(market_p) else None
@@ -281,6 +336,17 @@ def run_backtest(po_valid_pks: set[int] | None = None, min_season: int = 2015,
                     continue
                 status = "SETTLED" if has_result else "OPEN"
                 pnl = american_pnl(stake, quote["american"], result) if status == "SETTLED" and result else None
+                # Closing-line value: entry vs close for the SAME side, only
+                # when the entry was an earlier tier and a verified close exists.
+                closing_price = None
+                clv = None
+                close_american = quote.get("close_american")
+                if (quote.get("tier") != "close" and pd.notna(close_american)
+                        and f.get("market_quote_verified")):
+                    from ..config import am_to_prob as _am2p
+                    from .evaluation import clv_probability
+                    closing_price = float(close_american)
+                    clv = clv_probability(float(quote["american"]), closing_price)
                 if pnl is not None:
                     bankrolls[(strategy.sid, strategy.env)] += pnl
                     balances[(strategy.sid, strategy.env)].append((str(g.game_date), bankrolls[(strategy.sid, strategy.env)]))
@@ -288,7 +354,8 @@ def run_backtest(po_valid_pks: set[int] | None = None, min_season: int = 2015,
                 else:
                     counts["open"] += 1
                 bets.append(_bet_row(g, strategy, decision, stake, status, result, pnl,
-                                     market_price=quote["american"], quote=quote, run_id=run_id))
+                                     market_price=quote["american"], quote=quote, run_id=run_id,
+                                     closing_price=closing_price, clv=clv))
             elif has_result:
                 # A result can score model skill, but there is no bet or PnL.
                 counts["eval"] += 1
@@ -299,11 +366,17 @@ def run_backtest(po_valid_pks: set[int] | None = None, min_season: int = 2015,
                 bets.append(_bet_row(g, strategy, decision, 0.0, "PROPOSED", None, None,
                                      run_id=run_id))
             if has_result and strategy.market in {"ML", "F5_ML"}:
-                y = 1 if result == ("W" if decision["selection"] == "HOME" else "L") else 0
+                # y must be the outcome of the SELECTED side so it pairs with
+                # p_selection: y=1 iff the model's own pick won.  (An earlier
+                # build stored the home-win indicator here, which silently
+                # inverted the label for every AWAY pick.)
+                y = 1 if result == "W" else 0
                 metrics[(strategy.sid, strategy.env)].append((selected_p, y))
         # Every model saw this game before the state update.  Update the series
         # state after all decisions, and only with a verified result.
         _update_series(g, state)
+        if _has_score(g):
+            _update_online_coefs(g, f, ctx, bool(is_post))
         if is_post and _has_score(g) and g.round_code in ROUNDS:
             p_elo = f.get("p_elo")
             if isinstance(p_elo, (float, int)) and math.isfinite(float(p_elo)):
@@ -323,7 +396,8 @@ def run_backtest(po_valid_pks: set[int] | None = None, min_season: int = 2015,
 def _bet_row(g, strategy: Strategy, decision: dict[str, Any], stake: float,
              status: str, result: str | None, pnl: float | None,
              market_price: float | None = None, quote: dict[str, Any] | None = None,
-             run_id: str | None = None) -> dict[str, Any]:
+             run_id: str | None = None,
+             closing_price: float | None = None, clv: float | None = None) -> dict[str, Any]:
     return {
         "run_id": run_id, "prediction_id": _prediction_id(run_id or "run", strategy, int(g.game_pk)),
         "game_pk": int(g.game_pk), "strategy_id": strategy.sid, "env": strategy.env,
@@ -333,8 +407,9 @@ def _bet_row(g, strategy: Strategy, decision: dict[str, Any], stake: float,
         "required_price": decision.get("required_price"),
         "market_price": market_price, "edge": decision.get("edge"), "stake": stake,
         "made_at": db.utcnow(), "status": status, "result": result, "pnl": pnl,
-        "closing_price": (quote["american"] if quote and quote.get("closing") else None),
-        "clv": None, "series_state": getattr(g, "series_key", None),
+        "closing_price": (closing_price if closing_price is not None
+                          else (quote["american"] if quote and quote.get("closing") else None)),
+        "clv": clv, "series_state": getattr(g, "series_key", None),
         "synthetic_pnl": None, "synthetic": 0,
         "verification_status": "VERIFIED_PRICE" if quote else "NO_MARKET_PRICE",
         "quote_source_id": quote.get("source_id") if quote else None,
@@ -343,6 +418,7 @@ def _bet_row(g, strategy: Strategy, decision: dict[str, Any], stake: float,
         "quote_observed_at": quote.get("observed_at") if quote else None,
         "quote_available_at": quote.get("available_at") if quote else None,
         "quote_price_american": quote.get("american") if quote else None,
+        "price_tier": (decision.get("price_tier") or "open") if quote else None,
     }
 
 
@@ -373,11 +449,15 @@ def _append_run_outputs(run_id, all_strategies, runnable, bets, predictions,
             cur = conn.execute(
                 "INSERT INTO bets (game_pk,strategy_id,env,season,round_code,market,selection,model_prob,fair_price,"
                 "market_price,edge,stake,made_at,status,result,pnl,closing_price,clv,series_state,synthetic_pnl,synthetic,"
-                "run_id,prediction_id,verification_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                tuple(row[c] for c in ("game_pk", "strategy_id", "env", "season", "round_code", "market", "selection",
+                "run_id,prediction_id,verification_status,price_tier,required_price,quote_source_id,quote_source_url,"
+                "quote_source_observation_id,quote_observed_at,quote_available_at,quote_price_american) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(row.get(c) for c in ("game_pk", "strategy_id", "env", "season", "round_code", "market", "selection",
                                       "model_prob", "fair_price", "market_price", "edge", "stake", "made_at", "status",
                                       "result", "pnl", "closing_price", "clv", "series_state", "synthetic_pnl", "synthetic",
-                                      "run_id", "prediction_id", "verification_status")),
+                                      "run_id", "prediction_id", "verification_status", "price_tier", "required_price",
+                                      "quote_source_id", "quote_source_url", "quote_source_observation_id",
+                                      "quote_observed_at", "quote_available_at", "quote_price_american")),
             )
             if row["verification_status"] == "VERIFIED_PRICE" and row["status"] in {"OPEN", "SETTLED"}:
                 bet_id = int(cur.lastrowid)

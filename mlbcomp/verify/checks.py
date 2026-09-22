@@ -24,7 +24,21 @@ CHECKS = [
     "ledger_hash_chain", "ledger_append_only_triggers", "prediction_cutoff_present",
     "postseason_round_codes", "series_state_pre_game", "no_settlement_without_result",
     "no_live_execution_connector", "issue_queue_available",
+    "settlement_matches_scores", "quote_observations_verified",
+    "clv_in_range", "series_needed_format",
 ]
+
+
+def _outcome_from_scores(row) -> str | None:
+    if pd.isna(row.home_score) or pd.isna(row.away_score):
+        return None
+    if row.home_score == row.away_score:
+        return None
+    home_won = row.home_score > row.away_score
+    if row.market in {"ML", "F5_ML"}:
+        selected_home = str(row.selection) == "HOME"
+        return "W" if selected_home == home_won else "L"
+    return None  # totals/other markets need a line; handled separately
 
 
 def _check(conn, check_id: str, scope: str, passed: bool, details: str) -> bool:
@@ -176,6 +190,65 @@ def run_checks() -> dict[str, bool]:
     issue_count = int(conn.execute("SELECT COUNT(*) FROM data_issues").fetchone()[0])
     results["issue_queue_available"] = _check(conn, "issue_queue_available", "data_quality", "data_issues" in tables,
         f"data_issues table present; open/recorded issues={issue_count}")
+
+    # Recompute every scored ML bet's result from the source scores.  This
+    # catches label inversions (e.g. away picks scored with a home-win y)
+    # and any settlement drift between the games table and the ledger view.
+    settle_mismatch = 0
+    settle_checked = 0
+    if len(bets) and len(db_games):
+        scored = bets[bets.result.isin(["W", "L"]) & bets.market.isin(["ML", "F5_ML"])].copy()
+        if len(scored):
+            merged = scored.merge(
+                db_games[["game_pk", "home_score", "away_score"]], on="game_pk", how="inner")
+            for r in merged.itertuples():
+                expected = _outcome_from_scores(r)
+                if expected is None:
+                    continue
+                settle_checked += 1
+                if expected != r.result:
+                    settle_mismatch += 1
+    results["settlement_matches_scores"] = _check(conn, "settlement_matches_scores", "settlements",
+        settle_mismatch == 0,
+        f"scored ML rows re-derived from games: checked={settle_checked}, mismatches={settle_mismatch}")
+
+    # Every VERIFIED quote must point at a VERIFIED source observation.
+    quotes_bad = 0
+    if len(quotes):
+        obs = pd.read_sql("SELECT observation_id FROM source_observations WHERE verification_status='VERIFIED'", conn)
+        obs_ids = set(obs.observation_id)
+        vq = quotes[quotes.verification_status == "VERIFIED"]
+        quotes_bad = int(sum(1 for sid in vq.source_observation_id if sid not in obs_ids))
+    results["quote_observations_verified"] = _check(conn, "quote_observations_verified", "markets",
+        quotes_bad == 0,
+        f"verified quotes missing a VERIFIED source observation={quotes_bad}")
+
+    # CLV is a probability difference: must lie in [-1, 1].
+    clv_bad = 0
+    if len(bets) and "clv" in bets:
+        clv_vals = bets.clv.dropna()
+        clv_bad = int(((clv_vals < -1.0) | (clv_vals > 1.0)).sum())
+    results["clv_in_range"] = _check(conn, "clv_in_range", "markets", clv_bad == 0,
+        f"clv values outside [-1,1]={clv_bad}")
+
+    # Series tables must agree with the shared round_needed() format rules —
+    # guards against the WC single-game vs best-of-three bug class.
+    needed_bad = 0
+    series_tbl = pd.read_sql("SELECT * FROM series", conn)
+    if len(series_tbl):
+        from ..config import round_needed
+        for r in series_tbl.itertuples():
+            try:
+                expected = round_needed(r.round_code, int(r.season))
+            except ValueError:
+                needed_bad += 1
+                continue
+            if int(r.needed_a) != expected or int(r.needed_b) != expected:
+                needed_bad += 1
+    results["series_needed_format"] = _check(conn, "series_needed_format", "postseason",
+        needed_bad == 0,
+        f"series rows with wrong wins-needed={needed_bad} (shared round_required rules; "
+        "WC is single-game 2012-2019/2021, best-of-3 in 2020 and 2022+)")
 
     conn.commit()
     conn.close()

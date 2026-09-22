@@ -81,10 +81,13 @@ def _metrics() -> pd.DataFrame:
 
 def _leaderboard(strategies: list[dict], metrics: pd.DataFrame) -> list[dict]:
     metric_map = {(r.strategy_id, r.env): r for r in metrics.itertuples()} if not metrics.empty else {}
+    cal = _db_frame("SELECT strategy_id, env, brier, log_loss, n_games FROM calibration")
+    cal_map = {(r.strategy_id, r.env): r for r in cal.itertuples()} if not cal.empty else {}
     rows = []
     for strategy in strategies:
         sid, env = strategy["sid"], strategy["env"]
         m = metric_map.get((sid, env))
+        c = cal_map.get((sid, env))
         has_verified = m is not None and int(m.verified_bets) > 0
         total_pnl = float(m.total_pnl) if has_verified and m.total_pnl is not None else None
         roi = float(m.verified_roi * 100) if has_verified and m.verified_roi is not None else None
@@ -110,22 +113,53 @@ def _leaderboard(strategies: list[dict], metrics: pd.DataFrame) -> list[dict]:
             "max_drawdown": None,
             "equity_curve": ([STARTING_BANKROLL, round(STARTING_BANKROLL + total_pnl, 2)]
                              if total_pnl is not None else []),
-            "brier": None, "log_loss": None,
+            "brier": (float(c.brier) if c is not None and c.brier is not None
+                      and pd.notna(c.brier) else None),
+            "log_loss": (float(c.log_loss) if c is not None and c.log_loss is not None
+                         and pd.notna(c.log_loss) else None),
+            "calibration_n": (int(c.n_games) if c is not None and pd.notna(c.n_games)
+                              else 0),
             "status": strategy.get("status", "NOT_RUN"),
             "metric_status": m.metric_status if m is not None else "NO_DATA",
-            "pricing_note": "No verified quote means EVAL/PROPOSED only; PnL and ROI remain null.",
+            "pricing_note": ("No verified quote means EVAL/PROPOSED only; PnL and ROI "
+                             "remain null. Brier/log loss score model calibration on "
+                             "settled outcomes regardless of price."),
         }
         rows.append(row)
     return rows
+
+
+def _chain_status() -> bool | None:
+    try:
+        from ..engine.ledger import verify_chain
+        chain = verify_chain()
+        return bool(chain["valid"])
+    except Exception:
+        return None
 
 
 def _ledger(cap: int) -> list[dict[str, Any]]:
     bets = _db_frame("SELECT * FROM bets ORDER BY bet_id DESC")
     if bets.empty:
         return []
+    games = _db_frame("SELECT game_pk, home_team_id, away_team_id, game_date FROM games")
+    teams = _db_frame("SELECT team_id, abbr, name FROM teams")
+    strategies = _db_frame("SELECT strategy_id, model FROM strategies")
+    id2abbr = {int(r.team_id): r.abbr for r in teams.itertuples()} if not teams.empty else {}
+    game_map = {int(r.game_pk): r for r in games.itertuples()} if not games.empty else {}
+    model_map = {r.strategy_id: r.model for r in strategies.itertuples()} if not strategies.empty else {}
     out = []
     for r in bets.head(cap).itertuples():
-        out.append({k: getattr(r, k) for k in bets.columns})
+        row = {k: getattr(r, k) for k in bets.columns}
+        game = game_map.get(int(r.game_pk))
+        row["home_team_id"] = getattr(game, "home_team_id", None) if game is not None else None
+        row["away_team_id"] = getattr(game, "away_team_id", None) if game is not None else None
+        row["home_abbr"] = id2abbr.get(int(getattr(game, "home_team_id", 0) or 0)) if game is not None else None
+        row["away_abbr"] = id2abbr.get(int(getattr(game, "away_team_id", 0) or 0)) if game is not None else None
+        row["game_date"] = getattr(game, "game_date", None) if game is not None else None
+        row["model"] = model_map.get(r.strategy_id)
+        row["hash_chained"] = (r.verification_status == "VERIFIED_PRICE")
+        out.append(row)
     return out
 
 
@@ -156,15 +190,66 @@ def _upcoming() -> list[dict[str, Any]]:
             pass
     game_map = {int(r.game_pk): r for r in games.itertuples()} if not games.empty else {}
     filtered = predictions[predictions.game_pk.astype(int).isin(upcoming_pks)] if upcoming_pks else predictions.iloc[0:0]
-    return [{"prediction_id": r.prediction_id, "strategy_version_id": r.strategy_version_id,
-             "game_pk": int(r.game_pk), "round_code": r.round_code,
-             "decision_time": r.decision_time, "selection": r.selection,
-             "model_probability": r.model_probability, "fair_price": r.fair_price,
-             "required_price": r.required_price, "edge": r.edge,
-             "status": "PROPOSED", "market_price": None,
-             "verification_status": "NO_MARKET_PRICE",
-             "game_available": int(r.game_pk) in game_map}
-            for r in filtered.itertuples()]
+    # Reasoning inputs for the Postseason Center and forward-test views
+    # (spec §17): series state, probable pitchers when source-backed, price
+    # fields and the decision timestamp — missing inputs stay null/flagged.
+    try:
+        state = _db_frame("SELECT * FROM series_state")
+        state_map = {int(r.game_pk): r for r in state.itertuples()} if not state.empty else {}
+    except Exception:
+        state_map = {}
+    try:
+        pitchers = _db_frame("SELECT * FROM starting_pitchers")
+        sp_map: dict[int, dict] = {}
+        if not pitchers.empty:
+            for r in pitchers.itertuples():
+                sp_map.setdefault(int(r.game_pk), {})[
+                    "home" if r.team_id is not None else "away"] = r.player_id
+    except Exception:
+        sp_map = {}
+    out_rows = []
+    for r in filtered.itertuples():
+        st = state_map.get(int(r.game_pk))
+        game = game_map.get(int(r.game_pk))
+        out_rows.append({
+            "prediction_id": r.prediction_id, "strategy_version_id": r.strategy_version_id,
+            "game_pk": int(r.game_pk), "round_code": r.round_code,
+            "decision_time": r.decision_time, "selection": r.selection,
+            "model_probability": r.model_probability, "fair_price": r.fair_price,
+            "required_price": r.required_price, "edge": r.edge,
+            "status": "PROPOSED", "market_price": None,
+            "verification_status": "NO_MARKET_PRICE",
+            "game_available": int(r.game_pk) in game_map,
+            "environment": r.environment,
+            "series_state": ({
+                "series_key": getattr(st, "series_key", None),
+                "game_number": getattr(st, "game_number", None),
+                "wins_a_before": getattr(st, "wins_a_before", None),
+                "wins_b_before": getattr(st, "wins_b_before", None),
+                "elimination_a": getattr(st, "elimination_a", None),
+                "elimination_b": getattr(st, "elimination_b", None),
+                "clinch_a": getattr(st, "clinch_a", None),
+                "clinch_b": getattr(st, "clinch_b", None),
+                "games_remaining": getattr(st, "games_remaining", None),
+                "days_rest_home": getattr(st, "days_rest_home", None),
+                "days_rest_away": getattr(st, "days_rest_away", None),
+            } if st is not None else None),
+            "probable_pitchers": (sp_map.get(int(r.game_pk)) or None),
+            "probable_pitchers_status": (
+                "OBSERVED" if int(r.game_pk) in sp_map else "DATA_UNAVAILABLE"),
+            "home_team_id": getattr(game, "home_team_id", None) if game is not None else None,
+            "away_team_id": getattr(game, "away_team_id", None) if game is not None else None,
+            "game_date": getattr(game, "game_date", None) if game is not None else None,
+            "reasoning_inputs": [
+                "series state (pre-game)",
+                "point-in-time team features",
+                "probable pitchers" + ("" if int(r.game_pk) in sp_map else " — DATA_UNAVAILABLE"),
+                "observed price" + " — DATA_UNAVAILABLE (no verified quote at decision time)",
+                "required price / model probability / fair price / edge shown above",
+                "decision timestamp shown above",
+            ],
+        })
+    return out_rows
 
 
 def _research() -> list[dict[str, Any]]:
@@ -205,9 +290,18 @@ def _audit() -> list[dict[str, Any]]:
 def _issues() -> list[dict[str, Any]]:
     issues = _db_frame("SELECT * FROM data_issues ORDER BY detected_at DESC")
     if issues.empty:
-        return [{"id": "ISSUE-QUEUE-EMPTY", "title": "No issues recorded", "severity": "INFO",
-                 "status": "OPEN", "description": "The queue is ready; no source snapshot has been loaded.",
-                 "resolution": None}]
+        snapshot = (FEAT / "games.parquet").exists()
+        return [{
+            "id": "ISSUE-QUEUE-EMPTY",
+            "title": "No issues recorded",
+            "severity": "INFO",
+            "status": "OPEN",
+            "description": ("The queue is ready; no source snapshot has been loaded."
+                            if not snapshot else
+                            "The queue is ready; the loaded source snapshot has not "
+                            "produced any open data issues."),
+            "resolution": None,
+        }]
     return [{"id": r.issue_id, "title": r.issue_type, "severity": r.severity,
              "status": r.status, "description": r.description, "resolution": r.resolved_at}
             for r in issues.itertuples()]
@@ -227,6 +321,14 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
     bets = _db_frame("SELECT * FROM bets")
     verified_bets = bets[bets.verification_status == "VERIFIED_PRICE"] if not bets.empty else bets
     real_pnl = float(verified_bets.pnl.fillna(0).sum()) if not verified_bets.empty else None
+    if games.empty:
+        completed_games = upcoming_games = incomplete_historical = 0
+    else:
+        completed_games = int(games.home_score.notna().sum())
+        no_score = games.home_score.isna()
+        future = games.game_date.astype(str) >= TODAY
+        upcoming_games = int((no_score & future).sum())
+        incomplete_historical = int((no_score & ~future).sum())
     env_breakdown = {}
     for env in ["REG", "POST", *ROUNDS]:
         subset = metrics[metrics.env == env] if not metrics.empty else pd.DataFrame()
@@ -252,8 +354,9 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
         "data_mode": "SOURCE_SNAPSHOT" if source_snapshot else "NO_SOURCE_SNAPSHOT",
         "current_season": 2026,
         "current_stage": "No source snapshot loaded — no upcoming wager is asserted" if not source_snapshot else "Source snapshot loaded; live availability requires a fresh run",
-        "total_games_tracked": int(len(games)), "completed_games": int(games.home_score.notna().sum()) if not games.empty else 0,
-        "upcoming_games": int(games.home_score.isna().sum()) if not games.empty else 0,
+        "total_games_tracked": int(len(games)), "completed_games": completed_games,
+        "upcoming_games": upcoming_games,
+        "incomplete_historical_games": incomplete_historical,
         "total_strategies": len(strategies), "total_simulated_bets": len(bets),
         "settled_bets": int((bets.status == "SETTLED").sum()) if not bets.empty else 0,
         "total_simulated_pnl": round(real_pnl, 2) if real_pnl is not None else None,
@@ -261,8 +364,13 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
         "total_upcoming_bets": len(_upcoming()), "total_open_positions": int(_db_frame("SELECT * FROM positions WHERE state='OPEN'").shape[0]),
         "total_kalshi_trades": int(_db_frame("SELECT * FROM immutable_ledger WHERE market='PREDICTION_MARKET'").shape[0]),
         "kalshi_status": "OPTIONAL — no contracts, quotes, fills or liquidity are created without verified API observations",
-        "ledger_records_exported": len(_ledger(ledger_cap)), "ledger_records_in_db": len(bets),
-        "ledger_note": "The immutable ledger is append-only; the static export may be capped for page size.",
+        "ledger_records_exported": len(_ledger(ledger_cap)),
+        "bet_records_in_db": len(bets),
+        "immutable_ledger_rows": int(_db_frame("SELECT * FROM immutable_ledger").shape[0]),
+        "hash_chain_valid": (_chain_status()),
+        "ledger_note": ("bet_records are EVAL/PROPOSED/OPEN/SETTLED predictions from the backtest; only "
+                        "VERIFIED_PRICE rows are mirrored into the SHA-256 hash-chained immutable_ledger. "
+                        "The static export may be capped for page size."),
         "top_performing_strategy": None, "top_pnl": None, "top_roi": None,
         "environment_breakdown": env_breakdown,
         "limitations": [
@@ -285,6 +393,8 @@ def export(ledger_cap: int = LEDGER_CAP_DEFAULT) -> dict[str, Any]:
     kalshi_rows = kalshi.to_dict(orient="records") if not kalshi.empty else []
     _write("irregularities.json", _issues())
     _write("kalshi_trades.json", kalshi_rows)
+    players = _db_frame("SELECT player_id, name FROM players WHERE name IS NOT NULL ORDER BY name")
+    _write("players.json", [dict(r) for r in players.to_dict(orient="records")]) if not players.empty else _write("players.json", [])
     return summary
 
 
