@@ -1,10 +1,42 @@
 [
   {
-    "id": "ISSUE-QUEUE-EMPTY",
-    "title": "No issues recorded",
-    "severity": "INFO",
+    "id": "ISSUE-ODDS-NO-TIMESTAMPS",
+    "title": "MARKET_DATA",
+    "severity": "HIGH",
     "status": "OPEN",
-    "description": "The queue is ready; no source snapshot has been loaded.",
+    "description": "cesar-dx/mlb-betting-ml moneyline columns have no observed_at/available_at/closing_flag fields. Prices are retained for research joins only; they are UNVERIFIED and cannot create stakes, PnL, ROI or CLV.",
+    "resolution": null
+  },
+  {
+    "id": "ISSUE-2026-PO-PLACEHOLDERS",
+    "title": "SCHEDULE",
+    "severity": "MEDIUM",
+    "status": "OPEN",
+    "description": "2026 postseason schedule rows use placeholder team names (e.g. 'AL Wild Card #1') before the bracket is set. They are excluded from the normalized games table because no team mapping exists; no prediction is asserted for them.",
+    "resolution": null
+  },
+  {
+    "id": "ISSUE-NO-POINT-IN-TIME-LINEUPS",
+    "title": "ROSTER_DATA",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "description": "Confirmed lineups, injuries, weather forecasts and umpire assignments with announced_at/available_at timestamps are not available from any verified source in this environment. Strategies that require them remain DATA_UNAVAILABLE rather than using postgame content as pregame evidence.",
+    "resolution": null
+  },
+  {
+    "id": "ISSUE-EGRESS-BLOCKED",
+    "title": "SOURCE",
+    "severity": "MEDIUM",
+    "status": "OPEN",
+    "description": "statsapi.mlb.com, raw.githubusercontent.com, api.weather.gov, trading-api.kalshi.com, baseballsavant.mlb.com and retrosheet.org are unreachable from the execution environment (connection refused). Only api.github.com/codeload.github.com/pypi.org were reachable on 2026-09-21; every dependency is restricted to reachable, content-addressed sources.",
+    "resolution": null
+  },
+  {
+    "id": "OPEN-CLOSE-REFRESH-FAILED",
+    "title": "MARKET_DATA",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "description": "Open/close validation/refresh failed: ModuleNotFoundError: No module named 'pyreadr'",
     "resolution": null
   }
 ]

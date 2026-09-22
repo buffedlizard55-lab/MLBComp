@@ -179,10 +179,9 @@ def build_research() -> dict[str, Any]:
                     findings.append(_finding(qid, "REG", "DATA_UNAVAILABLE", 0, {}, "Late-season comparison requires completed calibration for both models.", provenance))
             elif qid == "Q10":
                 if not state.empty:
-                    # Merge state with postseason results to test series-state effect after Elo
-                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner")
+                    # games.parquet has its own game_number (doubleheader), so use suffixes
+                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner", suffixes=("", "_state"))
                     if len(merged) >= 30:
-                        # elimination/clinch flag
                         elim = merged[(merged.elimination_a==1) | (merged.elimination_b==1)]
                         non = merged[(merged.elimination_a==0) & (merged.elimination_b==0)]
                         a = (elim.home_score > elim.away_score).mean() if len(elim) else None
@@ -197,7 +196,7 @@ def build_research() -> dict[str, Any]:
                     findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {}, "Series-state table absent; cannot evaluate without pre-game counters.", provenance))
             elif qid == "Q11":
                 if not state.empty:
-                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner")
+                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner", suffixes=("", "_state"))
                     if len(merged) >= 10:
                         clinch = merged[(merged.clinch_a==1) | (merged.clinch_b==1)]
                         elim = merged[(merged.elimination_a==1) | (merged.elimination_b==1)]
@@ -210,12 +209,10 @@ def build_research() -> dict[str, Any]:
                     findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {}, "Series-state required.", provenance))
             elif qid == "Q13":
                 if not state.empty and "days_rest_home" in state.columns:
-                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner")
-                    # Simple check: does rest diff correlate with win?
+                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner", suffixes=("", "_state"))
                     merged = merged.dropna(subset=["days_rest_home", "days_rest_away"])
                     if len(merged) >= 30:
                         merged["rest_diff"] = merged["days_rest_home"] - merged["days_rest_away"]
-                        # Point-biserial correlation proxy: mean rest_diff for home wins vs losses
                         win = merged[merged.home_score > merged.away_score]["rest_diff"].mean()
                         loss = merged[merged.home_score < merged.away_score]["rest_diff"].mean()
                         delta = float(win - loss) if pd.notna(win) and pd.notna(loss) else None
@@ -281,12 +278,16 @@ def build_research() -> dict[str, Any]:
                         "game_events table absent; bullpen usage cannot be measured.", provenance))
             elif qid == "Q12":
                 if not state.empty:
-                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner")
-                    merged = merged[merged.game_number.notna()]
-                    if len(merged) >= 30:
+                    merged = post.merge(state, left_on="game_pk", right_on="game_pk", how="inner", suffixes=("", "_state"))
+                    # series_state game_number is _state when collision with schedule doubleheader number
+                    gn_col = "game_number_state" if "game_number_state" in merged.columns else "game_number"
+                    if gn_col not in merged.columns:
+                        gn_col = "game_number_y" if "game_number_y" in merged.columns else "game_number"
+                    merged = merged[merged[gn_col].notna()] if gn_col in merged.columns else merged
+                    if len(merged) >= 30 and gn_col in merged.columns:
                         merged["margin"] = merged.home_score - merged.away_score
                         by_number = {}
-                        for gn, sub in merged.groupby(merged.game_number.astype(int)):
+                        for gn, sub in merged.groupby(merged[gn_col].astype(int)):
                             by_number[int(gn)] = {"n": int(len(sub)),
                                                   "home_win_rate": _safe((sub.margin > 0).mean()),
                                                   "mean_margin": _safe(sub.margin.mean())}
@@ -295,8 +296,9 @@ def build_research() -> dict[str, Any]:
                             "Home win rate and mean margin by series game number (descriptive; "
                             "home-field pattern confounds raw rates).", provenance))
                     else:
-                        findings.append(_finding(qid, "POST", "INSUFFICIENT_SAMPLE", int(len(merged)),
-                            {"post_n": int(len(merged))}, "Too few postseason games for game-number split.", provenance))
+                        findings.append(_finding(qid, "POST", "INSUFFICIENT_SAMPLE" if len(merged) else "DATA_UNAVAILABLE",
+                            int(len(merged)) if len(merged) else 0,
+                            {"post_n": int(len(merged))}, "Too few postseason games for game-number split or missing column.", provenance))
                 else:
                     findings.append(_finding(qid, "POST", "DATA_UNAVAILABLE", 0, {},
                         "Series-state table absent.", provenance))

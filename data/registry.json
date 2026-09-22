@@ -17,7 +17,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Use for hypotheses and methods, not as an unverified data feed.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "baseball_reference",
@@ -37,7 +38,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Not a default automated dependency.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "baseballsavant_statcast",
@@ -57,7 +59,29 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Do not scrape unless the endpoint and terms are verified.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
+  },
+  {
+    "source_id": "bettingtools_open_close",
+    "name": "bettingtools historical MLB lines",
+    "url": "https://github.com/pwu97/bettingtools",
+    "data_type": "open/close MLB moneyline and totals lines",
+    "historical_depth": "2014-2019",
+    "current_availability": "AVAILABLE",
+    "access_method": "GitHub API git blobs",
+    "cost": "free public repository",
+    "restrictions": "attribution required by repository LICENSE",
+    "licensing": "custom: 'Everyone can use this package so long as you give credit'",
+    "reliability": "secondary market candidate (scraped from sportsbookreviewsonline.com)",
+    "granularity": "game/open-close quote",
+    "automation_capability": "high",
+    "verification_date": "2026-09-21",
+    "verification_status": "PARTIALLY_VERIFIED",
+    "limitations": "Open/close semantics are definitional (close = last line before first pitch); cross-check against cesar-dx 2019 closing lines is required before VERIFIED wager use.",
+    "last_http_status": 200.0,
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "cesar_dx_mlb_odds",
@@ -73,11 +97,12 @@
     "reliability": "secondary market candidate",
     "granularity": "game/quote",
     "automation_capability": "high",
-    "verification_date": "2026-09-21T22:52:37Z",
+    "verification_date": "2026-09-21",
     "verification_status": "PARTIALLY_VERIFIED",
     "limitations": "A row must include quote time and coverage; do not infer missing postseason prices.",
     "last_http_status": 200.0,
-    "last_error": null
+    "last_error": null,
+    "notes": "Moneyline rows join-verified to the schedule by game_pk/date/teams, but the source has no observed_at/available_at timestamps, so prices stay UNVERIFIED for wager eligibility."
   },
   {
     "source_id": "fangraphs",
@@ -97,7 +122,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Access and licensing must be checked for each dataset.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "github_search",
@@ -117,7 +143,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Discovery is not validation; pin commit and reproduce before use.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "kalshi_api",
@@ -137,7 +164,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Optional only. No order, fill, liquidity or price is created if the API is unavailable.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "mlb_schedule_official",
@@ -157,7 +185,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Probable is not confirmed; retain both timestamps.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "mlb_stats_api",
@@ -177,7 +206,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Must record retrieval and availability timestamps; live status is not historical closing data.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "noaa_ncei",
@@ -197,7 +227,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Join must use venue coordinates and observation time before first pitch.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "pybaseball",
@@ -217,7 +248,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Never treat a wrapper as independent corroboration of its upstream source.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "retrosheet",
@@ -237,7 +269,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Excellent history; current pre-game availability is limited.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "sportsdataverse_baseballr",
@@ -253,11 +286,12 @@
     "reliability": "secondary mirror candidate",
     "granularity": "game/play",
     "automation_capability": "high",
-    "verification_date": "2026-09-21T22:52:37Z",
+    "verification_date": "2026-09-21",
     "verification_status": "PARTIALLY_VERIFIED",
     "limitations": "Content must be checksum-pinned and cross-checked before settlement.",
     "last_http_status": 200.0,
-    "last_error": null
+    "last_error": null,
+    "notes": "24 content-addressed files retrieved and integrity-checked via api.github.com blobs; schedule/pbp validators run separately."
   },
   {
     "source_id": "umpire_scorecards",
@@ -277,7 +311,8 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "Use only if assignment timestamp and historical page are preserved.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   },
   {
     "source_id": "weather_gov",
@@ -297,6 +332,7 @@
     "verification_status": "NOT_VERIFIED",
     "limitations": "A current observation is not a historical forecast available at decision time.",
     "last_http_status": null,
-    "last_error": null
+    "last_error": null,
+    "notes": null
   }
 ]
